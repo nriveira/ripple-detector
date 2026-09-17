@@ -132,8 +132,9 @@ public:
         paramsChanged();
     }
 
-    /** Accumulates baseline statistics from one block of data */
-    virtual void calibrate (const float* data, int numSamples) = 0;
+    /** Accumulates baseline statistics from one block of data.
+        If featureOut is not null, the per-sample feature value is written to it. */
+    virtual void calibrate (const float* data, int numSamples, float* featureOut = nullptr) = 0;
 
     /** Finalises baseline statistics after the calibration period */
     virtual void finishCalibration()
@@ -141,8 +142,9 @@ public:
         baseline.finish();
     }
 
-    /** Runs detection on one block, appending TTL edges to 'events' */
-    virtual void process (const float* data, int numSamples, std::vector<DetectionEvent>& events) = 0;
+    /** Runs detection on one block, appending TTL edges to 'events'.
+        If featureOut is not null, the per-sample feature value is written to it. */
+    virtual void process (const float* data, int numSamples, std::vector<DetectionEvent>& events, float* featureOut = nullptr) = 0;
 
     /** True while an event is ongoing (TTL high) */
     bool isEventActive() const { return eventActive; }

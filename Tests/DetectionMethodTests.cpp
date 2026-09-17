@@ -509,6 +509,69 @@ void testParameterChangeMidRun()
         check (onsetsAfter == 0, name + ": raised threshold applied immediately");
     }
 }
+void testFeatureOutput()
+{
+    std::printf ("Feature output\n");
+
+    const double calib = 20.0;
+    Signal s = makeSignal (30.0, calib, 1.5, 1.5, 50.0, false);
+
+    for (const auto& name : METHODS)
+    {
+        auto p = defaultParams();
+        auto method = makeMethod (name);
+        method->setParams (p);
+        method->reset();
+
+        const int block = 1024;
+        const int64_t calibSamples = (int64_t) (calib * SAMPLE_RATE);
+        std::vector<float> feature ((size_t) s.data.size(), -1.0f);
+        std::vector<DetectionEvent> events;
+        std::vector<int64_t> ons;
+
+        for (int64_t pos = 0; pos < (int64_t) s.data.size(); pos += block)
+        {
+            const int len = (int) std::min<int64_t> (block, (int64_t) s.data.size() - pos);
+            float* out = feature.data() + pos;
+
+            if (pos < calibSamples)
+            {
+                method->calibrate (s.data.data() + pos, len, out);
+                if (pos + len >= calibSamples)
+                    method->finishCalibration();
+                continue;
+            }
+
+            events.clear();
+            method->process (s.data.data() + pos, len, events, out);
+            for (const auto& e : events)
+                if (e.state)
+                    ons.push_back (pos + e.sampleIndex);
+        }
+
+        // Every sample was written, and the feature is finite
+        bool allWritten = true;
+        for (float v : feature)
+            allWritten = allWritten && v != -1.0f && std::isfinite (v);
+        check (allWritten, name + ": feature written for every sample (calibration and detection)");
+
+        // At each onset the feature is above the onset threshold
+        bool aboveAtOnset = ! ons.empty();
+        for (auto on : ons)
+            aboveAtOnset = aboveAtOnset && feature[(size_t) on] > (float) method->getOnsetThreshold();
+        check (aboveAtOnset, name + ": feature exceeds onset threshold at every onset");
+
+        // The calibration statistics match the emitted feature
+        double sum = 0.0;
+        for (int64_t i = 0; i < calibSamples; i++)
+            sum += feature[(size_t) i];
+        const double meanOfOutput = sum / (double) calibSamples;
+        const double rel = std::fabs (meanOfOutput - method->getBaselineMean()) / std::max (1e-12, std::fabs (method->getBaselineMean()));
+        check (rel < 0.02, name + ": baseline mean matches the emitted feature during calibration");
+
+        std::printf ("  %-8s feature mean during calibration %.4g (baseline %.4g)\n", name.c_str(), meanOfOutput, method->getBaselineMean());
+    }
+}
 } // namespace
 
 int main()
@@ -519,6 +582,7 @@ int main()
     testHysteresisAndMaxDuration();
     testAdaptiveBaseline();
     testParameterChangeMidRun();
+    testFeatureOutput();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

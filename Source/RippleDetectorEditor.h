@@ -15,6 +15,8 @@ public:
     void buttonClicked (Button*) override;
     void updateSettings() override;
     void selectedStreamHasChanged() override;
+    void startAcquisition() override;
+    void stopAcquisition() override;
 
     /** Shows only the parameters used by the selected stream's detection method */
     void updateMethodView();
@@ -23,6 +25,7 @@ private:
     RippleDetector* rippleDetector;
 
     std::unique_ptr<UtilityButton> calibrateButton;
+    std::unique_ptr<ToggleButton> featureToggle;
 
     /** Adds a text box editor with the name on the left, sized to one row of the grid */
     void addRow (const String& name, int x, int y);

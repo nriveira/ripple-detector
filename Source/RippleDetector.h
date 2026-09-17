@@ -34,6 +34,13 @@ public:
     int rippleOutputChannel { 0 }; // Output TTL line for ripple events
     bool rippleTtlHigh { false }; // True while the ripple TTL line is high
 
+    // --- Feature output (derived continuous channels) ---
+    bool featureOutputRequested { false }; // Value of the "feature_out" parameter
+    bool featureOutputActive { false }; // Derived channels exist for this stream
+    ContinuousChannel* featureChannel { nullptr }; // Smoothed feature the method thresholds
+    ContinuousChannel* onsetThresholdChannel { nullptr }; // Current onset threshold
+    ContinuousChannel* offsetThresholdChannel { nullptr }; // Current offset threshold
+
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
     bool calibrate { false }; // Per-stream request to recalibrate (e.g. method changed)
@@ -109,8 +116,11 @@ private:
     /** Asks the editor to show the parameters relevant for the current method */
     void refreshEditor();
 
+    /** Adds the derived feature / threshold channels to a stream */
+    void addFeatureChannels (DataStream* stream);
+
     /** Handles the ripple channel for one block (calibration or detection) */
-    void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample);
+    void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut);
 
     /** Computes movement RMS windows for one block and updates pluginEnabled */
     void processMovement (uint16 streamId, AudioBuffer<float>& buffer, int numSamples, int64 firstSample);

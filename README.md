@@ -37,6 +37,18 @@ Notes:
 
 Movement gating (EMG / accelerometer) works the same way for every method. When movement blocks detection, a ripple TTL that is currently high is forced low.
 
+### Streaming the detection feature
+
+With the **Features** toggle (parameter `feature_out`, on by default) the plugin appends three continuous channels to each stream, so the quantity being thresholded can be watched in the LFP Viewer, streamed to other plugins, and recorded alongside the raw data:
+
+| Channel | Contents |
+|---|---|
+| `RIP_FEAT` | The smoothed feature of the selected method: windowed RMS (held constant across each window), the rectified and smoothed envelope, or the smoothed Teager-Kaiser energy |
+| `RIP_ON` | The current onset threshold (0 during calibration; follows the baseline in Adaptive mode) |
+| `RIP_OFF` | The current offset threshold (equal to `RIP_ON` for the RMS method) |
+
+The channels are typed as electrode channels and use the resolution (bit-volts) of the stream's first channel, so recordings keep the same scale as the input. Toggling the switch rebuilds the signal chain, which is why it is disabled during acquisition. Note that TKEO values have units of amplitude squared and are typically small, so they may need a smaller display range than the envelope or RMS.
+
 ### Adding a method
 
 Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.

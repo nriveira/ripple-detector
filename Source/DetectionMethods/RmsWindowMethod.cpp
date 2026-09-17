@@ -21,20 +21,24 @@ double RmsWindowMethod::windowRms (const float* data, int start, int end)
     return std::sqrt (sum / (double) (end - start));
 }
 
-void RmsWindowMethod::calibrate (const float* data, int numSamples)
+void RmsWindowMethod::calibrate (const float* data, int numSamples, float* featureOut)
 {
     const int window = std::max (1, std::min (params.rmsSamples, numSamples));
 
     for (int start = 0; start < numSamples; start += window)
     {
         const int end = std::min (start + window, numSamples);
-        baseline.accumulate (windowRms (data, start, end));
+        const double rms = windowRms (data, start, end);
+        baseline.accumulate (rms);
+
+        if (featureOut != nullptr)
+            std::fill (featureOut + start, featureOut + end, (float) rms);
     }
 
     samplesProcessed += numSamples;
 }
 
-void RmsWindowMethod::process (const float* data, int numSamples, std::vector<DetectionEvent>& events)
+void RmsWindowMethod::process (const float* data, int numSamples, std::vector<DetectionEvent>& events, float* featureOut)
 {
     const int window = std::max (1, std::min (params.rmsSamples, numSamples));
     const double alpha = params.adaptiveBaseline && params.adaptTauSeconds > 0.0
@@ -46,6 +50,9 @@ void RmsWindowMethod::process (const float* data, int numSamples, std::vector<De
         const int end = std::min (start + window, numSamples);
         const int64_t absoluteSample = samplesProcessed + start;
         const double rms = windowRms (data, start, end);
+
+        if (featureOut != nullptr)
+            std::fill (featureOut + start, featureOut + end, (float) rms);
 
         // The pulse emitted for the previous window ends here
         if (eventActive)

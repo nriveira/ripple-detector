@@ -17,12 +17,12 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     /* Column 1: channels and calibration */
     int col1 = 10;
 
-    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Ripple_Input", col1, 25);
+    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Ripple_Input", col1, 22);
     ParameterEditor* rippleInput = getParameterEditor ("Ripple_Input");
     rippleInput->setLayout (ParameterEditor::Layout::nameOnTop);
     rippleInput->setSize (80, 34);
 
-    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Ripple_Out", col1, 60);
+    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Ripple_Out", col1, 57);
     ParameterEditor* rippleOut = getParameterEditor ("Ripple_Out");
     rippleOut->setLayout (ParameterEditor::Layout::nameOnTop);
     rippleOut->setSize (80, 34);
@@ -30,8 +30,15 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     calibrateButton = std::make_unique<UtilityButton> ("CALIBRATE");
     calibrateButton->addListener (this);
     calibrateButton->setRadius (3.0f);
-    calibrateButton->setBounds (col1, 102, 80, 20);
+    calibrateButton->setBounds (col1, 92, 80, 16);
     addAndMakeVisible (calibrateButton.get());
+
+    // Custom toggle for the "feature_out" parameter: a ToggleParameterEditor does not fit in this column
+    featureToggle = std::make_unique<ToggleButton> ("Features");
+    featureToggle->setTooltip ("Stream the detection feature and thresholds as continuous channels (RIP_FEAT, RIP_ON, RIP_OFF). Rebuilds the signal chain.");
+    featureToggle->addListener (this);
+    featureToggle->setBounds (col1 - 2, 109, 86, 16);
+    addAndMakeVisible (featureToggle.get());
 
     /* Column 2: method and shared detection settings */
     int col2 = 98;
@@ -106,10 +113,28 @@ void RippleDetectorEditor::addRow (const String& name, int x, int y)
     ed->setSize (TEXT_WIDTH, ROW_HEIGHT);
 }
 
-void RippleDetectorEditor::buttonClicked (Button*)
+void RippleDetectorEditor::buttonClicked (Button* button)
 {
-    /* Calibration button was clicked */
-    rippleDetector->shouldCalibrate = true;
+    if (button == calibrateButton.get())
+    {
+        rippleDetector->shouldCalibrate = true;
+    }
+    else if (button == featureToggle.get())
+    {
+        if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
+            if (auto* p = stream->getParameter ("feature_out"))
+                p->setNextValue (featureToggle->getToggleState());
+    }
+}
+
+void RippleDetectorEditor::startAcquisition()
+{
+    featureToggle->setEnabled (false);
+}
+
+void RippleDetectorEditor::stopAcquisition()
+{
+    featureToggle->setEnabled (true);
 }
 
 // Called when settings are updated
@@ -143,4 +168,17 @@ void RippleDetectorEditor::updateMethodView()
 
     if (auto* ed = getParameterEditor ("adapt_tau"))
         ed->setVisible (adaptive);
+
+    // Feature output toggle reflects the selected stream
+    bool featureOut = false;
+    bool hasStream = false;
+    if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
+        if (auto* p = stream->getParameter ("feature_out"))
+        {
+            featureOut = (bool) p->getValue();
+            hasStream = true;
+        }
+
+    featureToggle->setToggleState (featureOut, dontSendNotification);
+    featureToggle->setEnabled (hasStream && ! acquisitionIsActive);
 }

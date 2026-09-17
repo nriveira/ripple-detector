@@ -43,15 +43,21 @@ double SampleFeatureMethod::smooth (double value)
     return smoothingSum / (double) smoothingFill;
 }
 
-void SampleFeatureMethod::calibrate (const float* data, int numSamples)
+void SampleFeatureMethod::calibrate (const float* data, int numSamples, float* featureOut)
 {
     for (int i = 0; i < numSamples; i++)
-        baseline.accumulate (smooth (computeFeature (data[i])));
+    {
+        const double feature = smooth (computeFeature (data[i]));
+        baseline.accumulate (feature);
+
+        if (featureOut != nullptr)
+            featureOut[i] = (float) feature;
+    }
 
     samplesProcessed += numSamples;
 }
 
-void SampleFeatureMethod::process (const float* data, int numSamples, std::vector<DetectionEvent>& events)
+void SampleFeatureMethod::process (const float* data, int numSamples, std::vector<DetectionEvent>& events, float* featureOut)
 {
     const double alpha = params.adaptiveBaseline && params.adaptTauSeconds > 0.0
                              ? 1.0 / (params.adaptTauSeconds * params.sampleRate)
@@ -61,6 +67,9 @@ void SampleFeatureMethod::process (const float* data, int numSamples, std::vecto
     {
         const int64_t absoluteSample = samplesProcessed + i;
         const double feature = smooth (computeFeature (data[i]));
+
+        if (featureOut != nullptr)
+            featureOut[i] = (float) feature;
 
         if (! eventActive)
         {

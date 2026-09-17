@@ -19,8 +19,8 @@ public:
     std::string getName() const override { return "RMS"; }
 
     void reset() override;
-    void calibrate (const float* data, int numSamples) override;
-    void process (const float* data, int numSamples, std::vector<DetectionEvent>& events) override;
+    void calibrate (const float* data, int numSamples, float* featureOut) override;
+    void process (const float* data, int numSamples, std::vector<DetectionEvent>& events, float* featureOut) override;
 
 protected:
     void paramsChanged() override;
