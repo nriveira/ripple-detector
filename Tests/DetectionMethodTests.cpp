@@ -18,7 +18,9 @@
 #include "DetectionMethods/RmsWindowMethod.h"
 #include "DetectionMethods/TkeoMethod.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <random>
