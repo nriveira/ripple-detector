@@ -2,12 +2,14 @@
 #define __RIPPLE_DETECTOR_H
 
 #include <ProcessorHeaders.h>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "DetectionMethods/DetectionMethod.h"
+#include "FeatureFifo.h"
 
 class RippleDetectorEditor;
 
@@ -23,12 +25,23 @@ public:
     /** Creates an event associated with ripple detection */
     TTLEventPtr createEvent (int64 outputLine, int64 sample_number, bool state);
 
+    /** Returns the method that currently emits events */
+    DetectionMethod* activeMethod() const { return methods[(size_t) activeMethodIndex.load()].get(); }
+
     // --- Ripple detection ---
-    String methodName; // Name of the selected detection method
-    std::unique_ptr<DetectionMethod> method; // Algorithm instance for this stream
-    DetectionParams params; // Parameters handed to the method
-    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the method
-    std::vector<DetectionEvent> events; // Scratch buffer for events produced in the current block
+    // Every method runs on every block so that the viewer can show any feature and
+    // switching methods does not require a new calibration. Only the active one emits events.
+    std::vector<std::unique_ptr<DetectionMethod>> methods; // One instance per entry of getDetectionMethodNames()
+    std::atomic<int> activeMethodIndex { 0 }; // Index of the method that emits events
+    DetectionParams params; // Parameters handed to every method
+    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the methods
+    std::atomic<bool> methodChanged { false }; // active method changed since the last block
+    std::vector<DetectionEvent> events; // Scratch buffer for events produced by the active method
+    std::vector<DetectionEvent> shadowEvents; // Discarded events of the non-active methods
+    std::array<std::vector<float>, FeatureFifo::NUM_FEATURES> featureScratch; // Per-method feature values for the block
+    std::array<std::vector<float>, FeatureFifo::NUM_FEATURES> zScratch; // Z-scored feature values for the block
+    std::vector<uint8_t> flagScratch; // Per-sample status flags for the block
+    FeatureFifo viewerFifo; // Hands features to the viewer
 
     int rippleInputChannel { -1 }; // Global index of the ripple input channel
     int rippleOutputChannel { 0 }; // Output TTL line for ripple events
@@ -37,13 +50,13 @@ public:
     // --- Feature output (derived continuous channels) ---
     bool featureOutputRequested { false }; // Value of the "feature_out" parameter
     bool featureOutputActive { false }; // Derived channels exist for this stream
-    ContinuousChannel* featureChannel { nullptr }; // Smoothed feature the method thresholds
+    ContinuousChannel* featureChannel { nullptr }; // Smoothed feature the active method thresholds
     ContinuousChannel* onsetThresholdChannel { nullptr }; // Current onset threshold
     ContinuousChannel* offsetThresholdChannel { nullptr }; // Current offset threshold
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
-    bool calibrate { false }; // Per-stream request to recalibrate (e.g. method changed)
+    bool calibrate { false }; // Per-stream request to recalibrate
     int pointsProcessed { 0 }; // Samples processed during the current calibration
     int calibrationPoints { 0 }; // Samples that define the calibration duration
 
@@ -102,15 +115,21 @@ public:
     /** Returns the name of the detection method selected for a stream */
     String getMethodName (uint16 streamId);
 
+    /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
+    FeatureFifo* getFeatureFifo (uint16 streamId);
+
+    /** Returns the parameters currently applied to a stream's methods, or nullptr */
+    const DetectionParams* getStreamParams (uint16 streamId);
+
     std::atomic<bool> shouldCalibrate { true };
 
 private:
     StreamSettings<RippleDetectorSettings> settings;
 
-    /** Replaces the detection method for a stream and requests recalibration */
+    /** Switches the method that emits events for a stream */
     void selectMethod (uint16 streamId, const String& methodName);
 
-    /** Pushes the current parameter values to the stream's method */
+    /** Marks the current parameter values to be pushed to the stream's methods */
     void applyParams (uint16 streamId);
 
     /** Asks the editor to show the parameters relevant for the current method */
@@ -119,8 +138,11 @@ private:
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);
 
-    /** Handles the ripple channel for one block (calibration or detection) */
+    /** Runs every method on the ripple channel and emits the active method's events */
     void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut);
+
+    /** Z-scores the block's features and hands them to the viewer queue */
+    void publishFeatures (uint16 streamId, int numSamples);
 
     /** Computes movement RMS windows for one block and updates pluginEnabled */
     void processMovement (uint16 streamId, AudioBuffer<float>& buffer, int numSamples, int64 firstSample);

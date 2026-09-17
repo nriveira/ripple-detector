@@ -1,4 +1,5 @@
 #include "RippleDetectorEditor.h"
+#include "RippleDetectorCanvas.h"
 
 // Row grid for the text-box style editors
 static const int ROW_HEIGHT = 17;
@@ -8,11 +9,9 @@ static const int TEXT_WIDTH = 150;
 
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
-    : GenericEditor (parentNode)
+    : VisualizerEditor (parentNode, "Ripple Detector", 605)
 {
     rippleDetector = (RippleDetector*) parentNode;
-
-    desiredWidth = 605; //Plugin's desired width
 
     /* Column 1: channels and calibration */
     int col1 = 10;
@@ -35,7 +34,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
 
     // Custom toggle for the "feature_out" parameter: a ToggleParameterEditor does not fit in this column
     featureToggle = std::make_unique<ToggleButton> ("Features");
-    featureToggle->setTooltip ("Stream the detection feature and thresholds as continuous channels (RIP_FEAT, RIP_ON, RIP_OFF). Rebuilds the signal chain.");
+    featureToggle->setTooltip ("Add the detection feature and thresholds to the stream as continuous channels (RIP_FEAT, RIP_ON, RIP_OFF), e.g. for recording. Rebuilds the signal chain. Not needed for the built-in viewer.");
     featureToggle->addListener (this);
     featureToggle->setBounds (col1 - 2, 109, 86, 16);
     addAndMakeVisible (featureToggle.get());
@@ -113,6 +112,11 @@ void RippleDetectorEditor::addRow (const String& name, int x, int y)
     ed->setSize (TEXT_WIDTH, ROW_HEIGHT);
 }
 
+Visualizer* RippleDetectorEditor::createNewCanvas()
+{
+    return new RippleDetectorCanvas (rippleDetector);
+}
+
 void RippleDetectorEditor::buttonClicked (Button* button)
 {
     if (button == calibrateButton.get())
@@ -130,11 +134,13 @@ void RippleDetectorEditor::buttonClicked (Button* button)
 void RippleDetectorEditor::startAcquisition()
 {
     featureToggle->setEnabled (false);
+    enable();
 }
 
 void RippleDetectorEditor::stopAcquisition()
 {
     featureToggle->setEnabled (true);
+    disable();
 }
 
 // Called when settings are updated
@@ -146,6 +152,10 @@ void RippleDetectorEditor::updateSettings()
 void RippleDetectorEditor::selectedStreamHasChanged()
 {
     updateMethodView();
+
+    // The viewer follows the stream selected in the editor
+    if (canvas != nullptr)
+        canvas->update();
 }
 
 void RippleDetectorEditor::updateMethodView()

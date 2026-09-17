@@ -28,7 +28,7 @@ Notes:
 - TKEO scales with (amplitude × frequency)², which emphasises fast oscillations and suppresses slower components that leak through the band-pass filter.
 - `Refrac. Time` is counted in samples from the event (from onset for RMS, from offset for Envelope/TKEO). The original plugin used wall-clock time, which drifted during File Reader playback.
 - `Offset Std Dev` is clamped to `Onset Std Dev` so an event always ends.
-- Changing the method requires a new calibration, which starts automatically. The method cannot be changed while acquisition is running; every other parameter can.
+- Every method is calibrated and computed continuously, so the method can be changed at any time, including during acquisition, without a new calibration.
 
 **Baseline** selects how the baseline statistics evolve after calibration:
 
@@ -37,9 +37,21 @@ Notes:
 
 Movement gating (EMG / accelerometer) works the same way for every method. When movement blocks detection, a ripple TTL that is currently high is forced low.
 
+### Viewing the detection features
+
+The plugin has a built-in viewer, opened with the tab / window buttons at the top right of the editor. It follows the stream selected in the editor and shows:
+
+- the z-scored feature (in baseline standard deviations) of any method, chosen with the **Feature** drop-down: *Active method* follows the `Method` parameter, or pick RMS, Envelope or TKEO explicitly to compare them on the same data;
+- the onset threshold (solid red) and, for Envelope / TKEO, the offset threshold (dashed orange);
+- detected events (green), periods blocked by movement (orange) and the calibration period (grey);
+- **Range** (vertical scale, in SD) and **Window** (2 to 30 s of history) drop-downs;
+- the detection parameters of the stream in a panel on the right, plus a CALIBRATE button.
+
+All three methods are computed on every block, each with its own baseline statistics, so the viewer can show any of them and switching the `Method` parameter takes effect immediately without a new calibration.
+
 ### Streaming the detection feature
 
-With the **Features** toggle (parameter `feature_out`, on by default) the plugin appends three continuous channels to each stream, so the quantity being thresholded can be watched in the LFP Viewer, streamed to other plugins, and recorded alongside the raw data:
+With the **Features** toggle (parameter `feature_out`, off by default) the plugin appends three continuous channels to each stream, so the quantity being thresholded can be streamed to other plugins and recorded alongside the raw data:
 
 | Channel | Contents |
 |---|---|

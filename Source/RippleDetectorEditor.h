@@ -1,16 +1,19 @@
 #ifndef __RIPPLE_DETECTOR_EDITOR_H
 #define __RIPPLE_DETECTOR_EDITOR_H
 
-#include <EditorHeaders.h>
+#include <VisualizerEditorHeaders.h>
 
 #include "RippleDetector.h"
 
-class RippleDetectorEditor : public GenericEditor,
+class RippleDetectorEditor : public VisualizerEditor,
                              public Button::Listener
 {
 public:
     RippleDetectorEditor (GenericProcessor* parentNode);
     virtual ~RippleDetectorEditor() {}
+
+    /** Creates the feature viewer */
+    Visualizer* createNewCanvas() override;
 
     void buttonClicked (Button*) override;
     void updateSettings() override;

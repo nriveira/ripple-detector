@@ -85,6 +85,12 @@ public:
     double getStd() const { return std::sqrt (variance); }
     int64_t getCount() const { return count; }
 
+    /** Standard deviation of the values accumulated so far (valid during calibration) */
+    double getRunningStd() const
+    {
+        return count > 1 ? std::sqrt (m2 / (double) (count - 1)) : 0.0;
+    }
+
 private:
     int64_t count { 0 };
     double mean { 0.0 };
@@ -151,6 +157,9 @@ public:
 
     double getBaselineMean() const { return baseline.getMean(); }
     double getBaselineStd() const { return baseline.getStd(); }
+
+    /** Standard deviation estimate available while calibration is still running */
+    double getRunningBaselineStd() const { return baseline.getRunningStd(); }
     double getOnsetThreshold() const { return baseline.getMean() + params.onsetSds * baseline.getStd(); }
     double getOffsetThreshold() const
     {

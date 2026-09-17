@@ -3,6 +3,7 @@
 #include "RippleDetectorEditor.h"
 
 #define CALIBRATION_DURATION_SECONDS 20
+#define VIEWER_FIFO_SECONDS 4.0f
 
 RippleDetectorSettings::RippleDetectorSettings()
 {
@@ -42,12 +43,12 @@ void RippleDetector::registerParameters()
         Parameter::STREAM_SCOPE,
         "method",
         "Method",
-        "Detection algorithm. RMS: windowed RMS above threshold (original algorithm). \
+        "Detection algorithm that emits events. RMS: windowed RMS above threshold (original algorithm). \
 Envelope: rectified and smoothed amplitude with onset/offset thresholds. \
-TKEO: Teager-Kaiser energy with onset/offset thresholds.",
+TKEO: Teager-Kaiser energy with onset/offset thresholds. \
+All algorithms are computed continuously, so switching does not require a new calibration.",
         getDetectionMethodNames(),
-        0,
-        true); // the method object is replaced on selection, so lock it during acquisition
+        0);
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
@@ -134,8 +135,8 @@ TKEO: Teager-Kaiser energy with onset/offset thresholds.",
         "feature_out",
         "Feature Output",
         "Adds three continuous channels to the stream: the smoothed feature the selected method thresholds (RIP_FEAT) \
-and the current onset / offset thresholds (RIP_ON, RIP_OFF). Useful for viewing in the LFP Viewer and for recording.",
-        true,
+and the current onset / offset thresholds (RIP_ON, RIP_OFF), e.g. for recording. The built-in viewer does not need this.",
+        false,
         true); // changing this rebuilds the signal chain, so lock it during acquisition
 
     /* Baseline settings */
@@ -231,6 +232,18 @@ void RippleDetector::updateSettings()
         s->params = DetectionParams();
         s->params.sampleRate = stream->getSampleRate();
 
+        // One instance of every method; all of them are calibrated and run on every block
+        s->methods.clear();
+        for (const auto& name : getDetectionMethodNames())
+        {
+            s->methods.push_back (createDetectionMethod (name));
+            s->methods.back()->setParams (s->params);
+            s->methods.back()->reset();
+        }
+        s->activeMethodIndex = 0;
+        s->methodChanged = false;
+        s->viewerFifo.setCapacity (stream->getSampleRate(), VIEWER_FIFO_SECONDS);
+
         s->rippleTtlHigh = false;
         s->pluginEnabled = true;
         s->isCalibrating = true;
@@ -254,9 +267,7 @@ void RippleDetector::updateSettings()
         if (s->featureOutputActive)
             addFeatureChannels (getDataStream (streamId));
 
-        // The method must exist before the other parameters are applied
         parameterValueChanged (stream->getParameter ("method"));
-
         parameterValueChanged (stream->getParameter ("Ripple_Input"));
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
@@ -343,22 +354,38 @@ String RippleDetector::getMethodName (uint16 streamId)
     return getDetectionMethodNames()[0];
 }
 
+FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return nullptr;
+
+    return &settings[streamId]->viewerFifo;
+}
+
+const DetectionParams* RippleDetector::getStreamParams (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return nullptr;
+
+    return &settings[streamId]->params;
+}
+
 void RippleDetector::selectMethod (uint16 streamId, const String& methodName)
 {
     RippleDetectorSettings* s = settings[streamId];
 
-    if (s->method != nullptr && s->methodName == methodName)
-        return;
+    int index = 0;
+    const Array<String> names = getDetectionMethodNames();
+    for (int i = 0; i < names.size(); i++)
+        if (names[i].equalsIgnoreCase (methodName))
+            index = i;
 
-    s->methodName = methodName;
-    s->method = createDetectionMethod (methodName);
-    s->method->setParams (s->params);
-    s->method->reset();
-
-    // Baseline statistics are method-specific, so a new calibration is required
-    s->calibrate = true;
-
-    LOGC ("Ripple Detector: stream ", streamId, " using ", s->method->getName(), " method");
+    if (index != s->activeMethodIndex.load())
+    {
+        s->activeMethodIndex = index;
+        s->methodChanged = true; // the audio thread lowers the TTL line if it is high
+        LOGC ("Ripple Detector: stream ", streamId, " now using ", names[index], " method");
+    }
 
     refreshEditor();
 }
@@ -378,7 +405,7 @@ void RippleDetector::refreshEditor()
 
 void RippleDetector::applyParams (uint16 streamId)
 {
-    // Parameters are handed to the method from the audio thread (see process()),
+    // Parameters are handed to the methods from the audio thread (see process()),
     // because setParams() may resize internal buffers.
     settings[streamId]->paramsDirty = true;
 }
@@ -589,11 +616,16 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             FloatVectorOperations::clear (offsetOut, numSamplesInBlock);
         }
 
-        if (s->rippleInputChannel < 0 || s->method == nullptr || numSamplesInBlock == 0)
+        if (s->rippleInputChannel < 0 || s->methods.empty() || numSamplesInBlock == 0)
             continue;
 
         if (s->paramsDirty.exchange (false))
-            s->method->setParams (s->params);
+            for (auto& method : s->methods)
+                method->setParams (s->params);
+
+        // A newly selected method starts with the output line low
+        if (s->methodChanged.exchange (false) && s->rippleTtlHigh)
+            setRippleTtl (streamId, false, 0, firstSampleInBlock);
 
         // Enable detection again if movement detection was switched off or if calibration was requested
         if (! s->pluginEnabled && (! s->movSwitchEnabled || calibrateAll))
@@ -608,18 +640,31 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
 
         if (calibrateAll || s->calibrate || movementChanged)
         {
-            LOGC ("Calibrating stream ", streamId, " (", s->method->getName(), ")...");
+            LOGC ("Calibrating stream ", streamId, "...");
 
             s->isCalibrating = true;
             s->calibrate = false;
             s->pointsProcessed = 0;
 
-            s->method->reset();
+            for (auto& method : s->methods)
+                method->reset();
             s->movBaseline.clear();
 
             if (s->rippleTtlHigh)
                 setRippleTtl (streamId, false, 0, firstSampleInBlock);
         }
+
+        // Scratch buffers for this block
+        for (int f = 0; f < FeatureFifo::NUM_FEATURES; f++)
+        {
+            if ((int) s->featureScratch[(size_t) f].size() < numSamplesInBlock)
+            {
+                s->featureScratch[(size_t) f].resize ((size_t) numSamplesInBlock);
+                s->zScratch[(size_t) f].resize ((size_t) numSamplesInBlock);
+            }
+        }
+        if ((int) s->flagScratch.size() < numSamplesInBlock)
+            s->flagScratch.resize ((size_t) numSamplesInBlock);
 
         // Movement gating is evaluated first so that it applies to this block's ripple events
         if (s->movSwitchEnabled)
@@ -631,9 +676,11 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         // Thresholds are only defined once calibration has finished
         if (onsetOut != nullptr && ! s->isCalibrating)
         {
-            FloatVectorOperations::fill (onsetOut, (float) s->method->getOnsetThreshold(), numSamplesInBlock);
-            FloatVectorOperations::fill (offsetOut, (float) s->method->getOffsetThreshold(), numSamplesInBlock);
+            FloatVectorOperations::fill (onsetOut, (float) s->activeMethod()->getOnsetThreshold(), numSamplesInBlock);
+            FloatVectorOperations::fill (offsetOut, (float) s->activeMethod()->getOffsetThreshold(), numSamplesInBlock);
         }
+
+        publishFeatures (streamId, numSamplesInBlock);
 
         if (s->isCalibrating)
         {
@@ -642,7 +689,8 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             if (s->pointsProcessed >= s->calibrationPoints)
             {
                 s->isCalibrating = false;
-                s->method->finishCalibration();
+                for (auto& method : s->methods)
+                    method->finishCalibration();
                 s->movBaseline.finish();
                 logCalibration (streamId);
             }
@@ -653,29 +701,100 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
 void RippleDetector::processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut)
 {
     RippleDetectorSettings* s = settings[streamId];
+    const int active = s->activeMethodIndex.load();
+
+    uint8_t baseFlags = 0;
+    if (s->isCalibrating)
+        baseFlags |= FeatureFifo::CALIBRATING;
+    if (! s->pluginEnabled)
+        baseFlags |= FeatureFifo::BLOCKED;
+    std::fill (s->flagScratch.begin(), s->flagScratch.begin() + numSamples, baseFlags);
 
     if (s->isCalibrating)
     {
-        s->method->calibrate (rippleData, numSamples, featureOut);
-        return;
+        for (size_t i = 0; i < s->methods.size(); i++)
+            s->methods[i]->calibrate (rippleData, numSamples, s->featureScratch[i].data());
     }
-
-    s->events.clear();
-    s->method->process (rippleData, numSamples, s->events, featureOut);
-
-    for (const auto& ev : s->events)
+    else
     {
-        if (ev.state)
+        for (size_t i = 0; i < s->methods.size(); i++)
         {
-            // Onsets are blocked while movement is detected
-            if (s->pluginEnabled && ! s->rippleTtlHigh)
-                setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+            if ((int) i == active)
+            {
+                s->events.clear();
+                s->methods[i]->process (rippleData, numSamples, s->events, s->featureScratch[i].data());
+            }
+            else
+            {
+                s->shadowEvents.clear();
+                s->methods[i]->process (rippleData, numSamples, s->shadowEvents, s->featureScratch[i].data());
+            }
         }
-        else if (s->rippleTtlHigh)
+
+        // Apply the active method's events to the TTL line and record the line state per sample
+        int cursor = 0;
+        bool high = s->rippleTtlHigh;
+
+        for (const auto& ev : s->events)
         {
-            setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+            bool newState = high;
+
+            if (ev.state)
+            {
+                // Onsets are blocked while movement is detected
+                if (s->pluginEnabled && ! high)
+                {
+                    setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+                    newState = true;
+                }
+            }
+            else if (high)
+            {
+                setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+                newState = false;
+            }
+
+            if (newState != high)
+            {
+                if (high)
+                    for (int k = cursor; k < ev.sampleIndex; k++)
+                        s->flagScratch[(size_t) k] |= FeatureFifo::TTL_HIGH;
+                cursor = ev.sampleIndex;
+                high = newState;
+            }
         }
+
+        if (high)
+            for (int k = cursor; k < numSamples; k++)
+                s->flagScratch[(size_t) k] |= FeatureFifo::TTL_HIGH;
     }
+
+    if (featureOut != nullptr)
+        std::copy (s->featureScratch[(size_t) active].begin(), s->featureScratch[(size_t) active].begin() + numSamples, featureOut);
+}
+
+void RippleDetector::publishFeatures (uint16 streamId, int numSamples)
+{
+    RippleDetectorSettings* s = settings[streamId];
+    std::array<const float*, FeatureFifo::NUM_FEATURES> src;
+
+    for (size_t f = 0; f < s->methods.size() && f < (size_t) FeatureFifo::NUM_FEATURES; f++)
+    {
+        const DetectionMethod* method = s->methods[f].get();
+        const double mean = method->getBaselineMean();
+        const double std = s->isCalibrating ? method->getRunningBaselineStd() : method->getBaselineStd();
+        const float scale = std > 0.0 ? (float) (1.0 / std) : 0.0f;
+        const float offset = (float) mean;
+
+        const float* in = s->featureScratch[f].data();
+        float* out = s->zScratch[f].data();
+        for (int i = 0; i < numSamples; i++)
+            out[i] = (in[i] - offset) * scale;
+
+        src[f] = out;
+    }
+
+    s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
 }
 
 void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex, int64 firstSample)
@@ -757,13 +876,12 @@ void RippleDetector::logCalibration (uint16 streamId)
 {
     RippleDetectorSettings* s = settings[streamId];
 
-    LOGC ("Calibration finished for stream ", streamId, " (", s->method->getName(), " method)");
-    LOGC ("Ripple channel -> baseline mean: ", s->method->getBaselineMean());
-    LOGC ("Ripple channel -> baseline std: ", s->method->getBaselineStd());
-    LOGC ("Ripple channel -> onset threshold (", s->params.onsetSds, " SD): ", s->method->getOnsetThreshold());
+    LOGC ("Calibration finished for stream ", streamId, " (active method: ", s->activeMethod()->getName(), ")");
 
-    if (! s->methodName.equalsIgnoreCase ("RMS"))
-        LOGC ("Ripple channel -> offset threshold (", s->params.offsetSds, " SD): ", s->method->getOffsetThreshold());
+    for (const auto& method : s->methods)
+    {
+        LOGC (method->getName(), " -> baseline mean: ", method->getBaselineMean(), ", std: ", method->getBaselineStd(), ", onset threshold (", s->params.onsetSds, " SD): ", method->getOnsetThreshold(), ", offset threshold: ", method->getOffsetThreshold());
+    }
 
     if (s->params.adaptiveBaseline)
         LOGC ("Ripple channel -> adaptive baseline, tau = ", s->params.adaptTauSeconds, " s");
