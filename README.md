@@ -12,6 +12,43 @@ The plugin can be added via the Open Ephys GUI's built-in Plugin Installer. Pres
 
 Instructions for using the Ripple Detector plugin are available [here](https://open-ephys.github.io/gui-docs/User-Manual/Plugins/Ripple-Detector.html).
 
+## Detection methods
+
+The input channel is expected to be band-pass filtered in the ripple band (e.g. 150-250 Hz) upstream, for instance with the Bandpass Filter plugin. The **Method** drop-down selects how that signal is turned into ripple events. Every method starts with a 20 s calibration period (also triggered by the **CALIBRATE** button) during which a baseline mean and standard deviation are estimated; thresholds are expressed in baseline standard deviations.
+
+| Method | Feature | Event onset | Event offset |
+|---|---|---|---|
+| **RMS** (default, original algorithm) | RMS of consecutive windows of `RMS Samples` samples | RMS above `Onset Std Dev` for longer than `Time Thresh.` | One RMS window after onset (fixed-length pulse) |
+| **Envelope** | Rectified signal smoothed with a `Smoothing` ms moving average | Envelope above `Onset Std Dev` for `Time Thresh.` | Envelope below `Offset Std Dev`, or `Max Duration` reached |
+| **TKEO** | Teager-Kaiser energy (`x[n]² − x[n−1]·x[n+1]`) smoothed with a `Smoothing` ms moving average | Energy above `Onset Std Dev` for `Time Thresh.` | Energy below `Offset Std Dev`, or `Max Duration` reached |
+
+Notes:
+
+- The Envelope and TKEO methods are causal, real-time versions of the classic offline approach (band-pass, envelope, z-score, onset/offset thresholds, minimum duration). Their TTL stays high for the whole event, so the falling edge marks the end of the ripple.
+- TKEO scales with (amplitude × frequency)², which emphasises fast oscillations and suppresses slower components that leak through the band-pass filter.
+- `Refrac. Time` is counted in samples from the event (from onset for RMS, from offset for Envelope/TKEO). The original plugin used wall-clock time, which drifted during File Reader playback.
+- `Offset Std Dev` is clamped to `Onset Std Dev` so an event always ends.
+- Changing the method requires a new calibration, which starts automatically. The method cannot be changed while acquisition is running; every other parameter can.
+
+**Baseline** selects how the baseline statistics evolve after calibration:
+
+- *Fixed* (default): the calibration values are used until the next calibration.
+- *Adaptive*: the mean and standard deviation keep tracking the signal outside of detected events with an exponential time constant of `Adapt Tau` seconds, so the threshold follows slow drifts in signal amplitude during long sessions.
+
+Movement gating (EMG / accelerometer) works the same way for every method. When movement blocks detection, a ripple TTL that is currently high is forced low.
+
+### Adding a method
+
+Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.
+
+### Testing the methods
+
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift. It needs only a C++17 compiler:
+
+```bash
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests
+```
+
 ## Building from source
 
 First, follow the instructions on [this page](https://open-ephys.github.io/gui-docs/Developer-Guide/Compiling-the-GUI.html) to build the Open Ephys GUI.
