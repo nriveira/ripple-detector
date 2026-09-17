@@ -15,7 +15,7 @@ jobs:
 
   build-windows:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'main')
-    runs-on: windows-latest
+    runs-on: windows-2022 # windows-latest (2025) ships VS 2026 only; plugin-GUI pins windows-2022 too
     
     steps:
     - uses: actions/checkout@v4
