@@ -130,7 +130,7 @@ The Pi broker must be started with --udp-trigger-port and must allow this comput
         "laser_host",
         "Laser Host",
         "Numeric IPv4 address of the LaserDriver Pi",
-        "",
+        "192.168.17.10",
         true);
 
     addIntParameter (

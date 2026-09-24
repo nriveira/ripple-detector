@@ -62,7 +62,7 @@ With **Laser Trigger** on, every ripple onset also sends one UDP datagram to the
 | Parameter | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `Laser Host` | Numeric IPv4 address of the Pi (no host names, so sending never waits on a lookup) |
+| `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so sending never waits on a lookup) |
 | `Laser Port` | The broker's `--udp-trigger-port` (default 27136) |
 
 The settings apply to every stream. On the Pi, start the broker with `--udp-trigger-port 27136 --udp-trigger-allow <this computer's IP>` (see LaserDriver `Pi/README.md`).
