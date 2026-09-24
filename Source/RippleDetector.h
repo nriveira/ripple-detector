@@ -106,7 +106,7 @@ public:
     /** Called when a parameter is updated */
     void parameterValueChanged (Parameter* param) override;
 
-    /** Reports how many laser triggers were sent during the run */
+    /** Logs the laser trigger counts and round-trip times */
     bool stopAcquisition() override;
 
     /** Calibration progress of a stream: 0..1 while calibrating, 1 when done, -1 if the stream is unknown */
@@ -127,10 +127,13 @@ public:
 
     std::atomic<bool> shouldCalibrate { true };
 
+    /** The laser trigger, for the editor's TEST button */
+    LaserTrigger& getLaserTrigger() { return laserTrigger; }
+
 private:
     StreamSettings<RippleDetectorSettings> settings;
 
-    /** Sends a UDP trigger to the LaserDriver Pi on every ripple onset (all streams) */
+    /** Fires the laser through the LaserDriver Pi's web API on every ripple onset (all streams) */
     LaserTrigger laserTrigger;
 
     /** Applies the laser_* parameters to laserTrigger; the destination only if it changed */

@@ -68,7 +68,16 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "laser_trigger", col3, ROW_Y[2]);
     ParameterEditor* laserTrigger = getParameterEditor ("laser_trigger");
     laserTrigger->setLayout (ParameterEditor::Layout::nameOnLeft);
-    laserTrigger->setSize (TEXT_WIDTH, ROW_HEIGHT);
+    laserTrigger->setSize (TEXT_WIDTH - 58, ROW_HEIGHT);
+
+    laserTestButton = std::make_unique<UtilityButton> ("TEST");
+    laserTestButton->addListener (this);
+    laserTestButton->setRadius (3.0f);
+    laserTestButton->setTooltip ("Fires the laser once through the Pi's web API, whether or not Laser Trigger is on, "
+                                 "and shows the answer: the round-trip time in ms when it fired, REJECTED (the Pi is up "
+                                 "but did not fire), NO LINK (no answer from Laser Host:Laser Port) or SET HOST.");
+    laserTestButton->setBounds (col3 + TEXT_WIDTH - 56, ROW_Y[2], 56, ROW_HEIGHT);
+    addAndMakeVisible (laserTestButton.get());
 
     for (int i = 0; i < 2; i++)
     {
@@ -148,12 +157,74 @@ void RippleDetectorEditor::buttonClicked (Button* button)
         rippleDetector->shouldCalibrate = true;
         timerCallback();
     }
+    else if (button == laserTestButton.get())
+    {
+        startLaserTest();
+    }
     else if (button == featureToggle.get())
     {
         if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
             if (auto* p = stream->getParameter ("feature_out"))
                 p->setNextValue (featureToggle->getToggleState());
     }
+}
+
+void RippleDetectorEditor::startLaserTest()
+{
+    LaserTrigger& trigger = rippleDetector->getLaserTrigger();
+
+    if (! trigger.test())
+    {
+        showLaserTestLabel ("SET HOST", 10);
+        return;
+    }
+
+    laserTestTarget = trigger.getTestsRequested();
+    laserTestResultTicks = 0;
+    laserTestButton->setLabel ("...");
+    laserTestButton->setEnabledState (false);
+    laserTestPoller.startTimer (100);
+}
+
+void RippleDetectorEditor::pollLaserTest()
+{
+    // Counting down a shown result
+    if (laserTestResultTicks > 0)
+    {
+        if (--laserTestResultTicks == 0)
+        {
+            laserTestPoller.stopTimer();
+            laserTestButton->setLabel ("TEST");
+        }
+        return;
+    }
+
+    LaserTrigger& trigger = rippleDetector->getLaserTrigger();
+    if ((int32_t) (trigger.getTestsCompleted() - laserTestTarget) < 0)
+        return; // still waiting for the Pi
+
+    laserTestButton->setEnabledState (true);
+
+    switch (trigger.getTestReply())
+    {
+        case LaserTriggerHttp::Reply::Fired:
+            showLaserTestLabel (String (trigger.getTestMs(), 0) + " ms", 30);
+            break;
+        case LaserTriggerHttp::Reply::Rejected:
+            showLaserTestLabel ("REJECTED", 30);
+            break;
+        default:
+            showLaserTestLabel ("NO LINK", 30);
+            break;
+    }
+}
+
+void RippleDetectorEditor::showLaserTestLabel (const String& text, int holdTicks)
+{
+    laserTestButton->setLabel (text);
+    laserTestButton->setEnabledState (true);
+    laserTestResultTicks = holdTicks;
+    laserTestPoller.startTimer (100);
 }
 
 void RippleDetectorEditor::startAcquisition()

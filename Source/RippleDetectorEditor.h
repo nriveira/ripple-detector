@@ -36,6 +36,26 @@ private:
 
     std::unique_ptr<UtilityButton> calibrateButton;
     std::unique_ptr<ToggleButton> featureToggle;
+    std::unique_ptr<UtilityButton> laserTestButton;
+
+    /** Polls the laser TEST request and shows its outcome on the button */
+    class LaserTestPoller : public Timer
+    {
+    public:
+        explicit LaserTestPoller (RippleDetectorEditor& e) : editor (e) {}
+        void timerCallback() override { editor.pollLaserTest(); }
+
+    private:
+        RippleDetectorEditor& editor;
+    };
+
+    LaserTestPoller laserTestPoller { *this };
+    uint32_t laserTestTarget { 0 }; // tests completed once this one is answered
+    int laserTestResultTicks { 0 }; // > 0 while a result is shown
+
+    void startLaserTest();
+    void pollLaserTest();
+    void showLaserTestLabel (const String& text, int holdTicks);
 
     /** Adds a text box editor with the name on the left, sized to one row of the grid */
     void addRow (const String& name, int x, int y);

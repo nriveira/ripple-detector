@@ -116,13 +116,13 @@ Adaptive: after calibration, the baseline keeps tracking the signal outside of d
         99999,
         1);
 
-    /* Closed-loop laser trigger (LaserDriver Pi broker, Pi/udp_trigger.py) */
+    /* Closed-loop laser trigger (LaserDriver Pi web API, POST /api/trigger_gpio) */
     addBooleanParameter (
         Parameter::PROCESSOR_SCOPE,
         "laser_trigger",
         "Laser Trigger",
-        "Sends a UDP datagram to the LaserDriver Pi on every ripple onset, from the same block as the TTL event. \
-The Pi broker must be started with --udp-trigger-port and must allow this computer's address.",
+        "Fires the laser on every ripple onset through the LaserDriver Pi's web API (POST /api/trigger_gpio), \
+requested from the same block as the TTL event.",
         false);
 
     addStringParameter (
@@ -137,8 +137,8 @@ The Pi broker must be started with --udp-trigger-port and must allow this comput
         Parameter::PROCESSOR_SCOPE,
         "laser_port",
         "Laser Port",
-        "UDP port of the LaserDriver Pi broker's trigger listener (--udp-trigger-port)",
-        LaserTriggerPacket::DEFAULT_PORT,
+        "Port of the LaserDriver Pi's web API",
+        LaserTriggerHttp::DEFAULT_PORT,
         1,
         65535,
         true);
@@ -406,8 +406,12 @@ void RippleDetector::configureLaserTrigger (bool destinationChanged)
 
 bool RippleDetector::stopAcquisition()
 {
-    if (laserTrigger.getSent() > 0 || laserTrigger.getFailed() > 0)
-        LOGC ("Laser Trigger: ", (int) laserTrigger.getSent(), " sent, ", (int) laserTrigger.getFailed(), " failed so far");
+    const auto st = laserTrigger.getStats();
+
+    if (st.requested > 0)
+        LOGC ("Laser Trigger: ", (int) st.requested, " requested, ", (int) st.fired, " fired, ",
+              (int) st.rejected, " rejected by the Pi, ", (int) st.failed, " failed; round trip mean ",
+              st.meanMs, " ms, max ", st.maxMs, " ms");
 
     return true;
 }
@@ -771,9 +775,9 @@ void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex,
 {
     RippleDetectorSettings* s = settings[streamId];
 
-    // The datagram goes first: it is the latency path to the stimulus
+    // Requested first: it is the latency path to the stimulus
     if (state)
-        laserTrigger.fire (firstSample + sampleIndex);
+        laserTrigger.fire();
 
     addEvent (s->createEvent (s->rippleOutputChannel, firstSample + sampleIndex, state), sampleIndex);
     s->rippleTtlHigh = state;
