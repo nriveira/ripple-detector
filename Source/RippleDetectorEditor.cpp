@@ -74,7 +74,8 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     laserTestButton->addListener (this);
     laserTestButton->setRadius (3.0f);
     laserTestButton->setTooltip ("Fires the laser once through the Pi's web API, whether or not Laser Trigger is on, "
-                                 "and shows the answer: the round-trip time in ms when it fired, REJECTED (the Pi is up "
+                                 "and shows the answer: the time in ms from the request to the Pi's reply when it fired (the Pi "
+                                 "fires before replying, so this bounds the trigger delay), REJECTED (the Pi is up "
                                  "but did not fire), NO LINK (no answer from Laser Host:Laser Port) or SET HOST.");
     laserTestButton->setBounds (col3 + TEXT_WIDTH - 56, ROW_Y[2], 56, ROW_HEIGHT);
     addAndMakeVisible (laserTestButton.get());

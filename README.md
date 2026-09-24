@@ -62,11 +62,13 @@ With **Laser Trigger** on, every ripple onset fires the laser through the [Laser
 | Control | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `TEST` | Fires once, whether or not `Laser Trigger` is on, and shows the Pi's answer on the button: the round-trip time in ms when it fired, `REJECTED` (the Pi answered but did not fire, e.g. its GPIO is unavailable), `NO LINK` (no answer from `Laser Host`:`Laser Port`) or `SET HOST` |
+| `TEST` | Fires once, whether or not `Laser Trigger` is on, and shows the Pi's answer on the button: the time in ms from the request to the Pi's reply when it fired, `REJECTED` (the Pi answered but did not fire, e.g. its GPIO is unavailable), `NO LINK` (no answer from `Laser Host`:`Laser Port`) or `SET HOST` |
 | `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so a trigger never waits on a lookup) |
 | `Laser Port` | Port of the Pi's web API (default 8080) |
 
-The settings apply to every stream. An HTTP request blocks for a connection and a reply, so it is never made on the audio thread: the onset only counts a request and wakes a sender thread, which makes one request per onset and times it. At the end of each run the log reports how many triggers were requested, fired, rejected and failed, with the mean and maximum round trip. The round trip includes the Pi's GPIO pulse, so it is an upper bound on the network part of the stimulation delay.
+The settings apply to every stream. An HTTP request blocks for a connection and a reply, so it is never made on the audio thread: the onset only counts a request and wakes a sender thread, which makes one request per onset and times it to the first byte of the Pi's reply. The Pi fires before it replies, so that time is an upper bound on the request-to-fire delay; at the end of each run the log reports how many triggers were requested, fired, rejected and failed, with its mean and maximum. The reply is read only up to its declared length: Flask's development server takes about 10 ms more to close the connection, which the laser never waits for.
+
+These numbers cover the network hop only. The full detection-to-stimulus delay also includes the `Time Thresh.` criterion and the GUI's processing block; record the stimulator's output on an acquisition-board input to measure it end to end.
 
 The request and the reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors LaserDriver `Pi/web_app.py`.
 

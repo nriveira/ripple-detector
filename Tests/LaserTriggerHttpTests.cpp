@@ -64,6 +64,16 @@ void testReplies()
            "not HTTP -> Malformed");
 }
 
+void testComplete()
+{
+    const std::string full = response ("200 OK", "{\"ok\":true,\"path\":\"gpio\"}\n");
+    check (LaserTriggerHttp::isComplete (full), "complete once Content-Length bytes of body arrived");
+    check (! LaserTriggerHttp::isComplete (full.substr (0, full.size() - 1)), "incomplete one byte short");
+    check (! LaserTriggerHttp::isComplete (full.substr (0, full.find ("\r\n\r\n"))), "incomplete before the blank line");
+    check (LaserTriggerHttp::isComplete ("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"), "header name is case-insensitive");
+    check (! LaserTriggerHttp::isComplete ("HTTP/1.1 200 OK\r\n\r\n{\"ok\": true}"), "no Content-Length: wait for the close");
+}
+
 void testNumericIPv4()
 {
     check (LaserTriggerHttp::isNumericIPv4 ("192.168.17.10"), "accepts a dotted quad");
@@ -83,6 +93,7 @@ int main()
 {
     testRequest();
     testReplies();
+    testComplete();
     testNumericIPv4();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);

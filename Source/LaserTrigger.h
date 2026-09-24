@@ -13,9 +13,9 @@
 
     An HTTP request blocks for a connect and a reply, so it cannot run on the
     audio thread. fire() only counts the request and wakes a sender thread;
-    the thread makes one request per fire() and times each round trip, which
-    includes the Pi's GPIO pulse, so the stats are a measured upper bound on
-    the network part of the stimulation delay.
+    the thread makes one request per fire() and times it to the first byte of
+    the Pi's reply, which the Pi only writes after firing, so the stats are a
+    measured upper bound on the request-to-fire delay.
 
     configure() runs on the message thread while acquisition is stopped.
 */
@@ -48,7 +48,7 @@ public:
     uint32_t getTestsRequested() const { return testsRequested_; }
     uint32_t getTestsCompleted() const { return testsCompleted_; }
 
-    /** Outcome and round trip of the most recent test */
+    /** Outcome and request-to-first-reply-byte time of the most recent test */
     LaserTriggerHttp::Reply getTestReply() const { return (LaserTriggerHttp::Reply) testReply_.load(); }
     double getTestMs() const { return testMs_; }
 
@@ -58,7 +58,7 @@ public:
         uint32_t fired; // Pi answered "ok": true
         uint32_t rejected; // Pi answered "ok": false (up, but did not fire)
         uint32_t failed; // no connection, timeout, or unexpected reply
-        double meanMs; // round trip of answered requests
+        double meanMs; // request to first reply byte, over answered requests
         double maxMs;
     };
 
@@ -67,8 +67,8 @@ public:
 private:
     void run() override;
 
-    /** One HTTP round trip; returns the Pi's answer, or Malformed on any socket failure. */
-    LaserTriggerHttp::Reply post (const String& host, int port);
+    /** One HTTP request; returns the Pi's answer (Malformed on any socket failure) and the time to its first byte. */
+    LaserTriggerHttp::Reply post (const String& host, int port, double& firstByteMs);
 
     CriticalSection destinationLock; // host_/port_ between configure() and the sender thread
     String host_;
@@ -92,7 +92,7 @@ private:
     std::atomic<int> testReply_ { (int) LaserTriggerHttp::Reply::Malformed };
     std::atomic<double> testMs_ { 0.0 };
 
-    /** Copies the destination under the lock and makes one timed request */
+    /** Copies the destination under the lock and makes one request */
     LaserTriggerHttp::Reply postTimed (double& ms);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LaserTrigger);

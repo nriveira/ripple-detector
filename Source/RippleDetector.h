@@ -106,7 +106,7 @@ public:
     /** Called when a parameter is updated */
     void parameterValueChanged (Parameter* param) override;
 
-    /** Logs the laser trigger counts and round-trip times */
+    /** Logs the laser trigger counts and request-to-reply times */
     bool stopAcquisition() override;
 
     /** Calibration progress of a stream: 0..1 while calibrating, 1 when done, -1 if the stream is unknown */

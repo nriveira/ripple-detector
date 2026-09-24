@@ -68,10 +68,7 @@ LaserTriggerHttp::Reply LaserTrigger::postTimed (double& ms)
         port = port_;
     }
 
-    const int64 start = Time::getHighResolutionTicks();
-    const auto reply = post (host, port);
-    ms = Time::highResolutionTicksToSeconds (Time::getHighResolutionTicks() - start) * 1000.0;
-    return reply;
+    return post (host, port, ms);
 }
 
 void LaserTrigger::run()
@@ -113,21 +110,25 @@ void LaserTrigger::run()
     }
 }
 
-LaserTriggerHttp::Reply LaserTrigger::post (const String& host, int port)
+LaserTriggerHttp::Reply LaserTrigger::post (const String& host, int port, double& firstByteMs)
 {
+    firstByteMs = 0.0;
+
     StreamingSocket socket;
     if (! socket.connect (host, port, CONNECT_TIMEOUT_MS))
         return LaserTriggerHttp::Reply::Malformed;
 
     const std::string request = LaserTriggerHttp::buildRequest (host.toStdString(), port);
+    const int64 sent = Time::getHighResolutionTicks();
     if (socket.write (request.data(), (int) request.size()) != (int) request.size())
         return LaserTriggerHttp::Reply::Malformed;
 
-    // Read until the server closes the connection (Connection: close)
+    // Read until the declared length has arrived (or the server closes), not
+    // until the close itself: see LaserTriggerHttp.h
     std::string response;
     char buffer[512];
 
-    while ((int) response.size() < MAX_REPLY_BYTES)
+    while ((int) response.size() < MAX_REPLY_BYTES && ! LaserTriggerHttp::isComplete (response))
     {
         if (socket.waitUntilReady (true, REPLY_TIMEOUT_MS) != 1)
             break;
@@ -135,6 +136,9 @@ LaserTriggerHttp::Reply LaserTrigger::post (const String& host, int port)
         const int n = socket.read (buffer, (int) sizeof (buffer), false);
         if (n <= 0)
             break;
+
+        if (response.empty())
+            firstByteMs = Time::highResolutionTicksToSeconds (Time::getHighResolutionTicks() - sent) * 1000.0;
 
         response.append (buffer, (size_t) n);
     }

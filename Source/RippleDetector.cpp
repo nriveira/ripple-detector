@@ -410,7 +410,7 @@ bool RippleDetector::stopAcquisition()
 
     if (st.requested > 0)
         LOGC ("Laser Trigger: ", (int) st.requested, " requested, ", (int) st.fired, " fired, ",
-              (int) st.rejected, " rejected by the Pi, ", (int) st.failed, " failed; round trip mean ",
+              (int) st.rejected, " rejected by the Pi, ", (int) st.failed, " failed; request to Pi reply mean ",
               st.meanMs, " ms, max ", st.maxMs, " ms");
 
     return true;

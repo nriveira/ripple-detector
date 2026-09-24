@@ -2,6 +2,7 @@
 #define __LASER_TRIGGER_HTTP_H
 
 #include <cctype>
+#include <cstdlib>
 #include <string>
 
 // The LaserDriver Pi's web API (LaserDriver Pi/web_app.py), which is how the
@@ -12,6 +13,11 @@
 //
 // The endpoint fires the fast trigger (Pi GPIO 24 -> MSPM0 PA19 edge ISR).
 // "ok" is false when the broker could not fire, e.g. its GPIO is not open.
+//
+// The Pi fires before it writes the reply, so the time to the reply's first
+// byte bounds the request-to-fire delay. Flask's development server then
+// takes ~10 ms more to close the connection, which the laser never waits
+// for, so the reply is read only up to its Content-Length.
 //
 // Free of JUCE so Tests/ can check the request and the reply parsing.
 namespace LaserTriggerHttp
@@ -34,6 +40,26 @@ inline std::string buildRequest (const std::string& host, int port)
          + "Content-Length: 0\r\n"
          + "Connection: close\r\n"
          + "\r\n";
+}
+
+/** True once the headers and Content-Length bytes of body have arrived. */
+inline bool isComplete (const std::string& response)
+{
+    const size_t bodyStart = response.find ("\r\n\r\n");
+    if (bodyStart == std::string::npos)
+        return false;
+
+    // Header names are case-insensitive; Werkzeug writes "Content-Length"
+    std::string headers = response.substr (0, bodyStart);
+    for (auto& c : headers)
+        c = (char) std::tolower ((unsigned char) c);
+
+    const size_t key = headers.find ("\r\ncontent-length:");
+    if (key == std::string::npos)
+        return false; // no length: the body ends when the server closes
+
+    const long length = std::strtol (headers.c_str() + key + 17, nullptr, 10);
+    return length >= 0 && response.size() >= bodyStart + 4 + (size_t) length;
 }
 
 inline Reply parseReply (const std::string& response)
