@@ -64,6 +64,21 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
 
     addRow ("adapt_tau", col3, ROW_Y[1]);
 
+    // Closed-loop laser trigger (applies to every stream)
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "laser_trigger", col3, ROW_Y[2]);
+    ParameterEditor* laserTrigger = getParameterEditor ("laser_trigger");
+    laserTrigger->setLayout (ParameterEditor::Layout::nameOnLeft);
+    laserTrigger->setSize (TEXT_WIDTH, ROW_HEIGHT);
+
+    for (int i = 0; i < 2; i++)
+    {
+        const String name = i == 0 ? "laser_host" : "laser_port";
+        addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, name, col3, ROW_Y[3 + i]);
+        ParameterEditor* ed = getParameterEditor (name);
+        ed->setLayout (ParameterEditor::Layout::nameOnLeft);
+        ed->setSize (TEXT_WIDTH, ROW_HEIGHT);
+    }
+
     /* Column 4 and 5: EMG / ACC movement detection settings */
     int col4 = 412;
 

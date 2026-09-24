@@ -10,6 +10,7 @@
 
 #include "DetectionMethods/DetectionMethod.h"
 #include "FeatureFifo.h"
+#include "LaserTrigger.h"
 
 class RippleDetectorEditor;
 
@@ -105,6 +106,9 @@ public:
     /** Called when a parameter is updated */
     void parameterValueChanged (Parameter* param) override;
 
+    /** Reports how many laser triggers were sent during the run */
+    bool stopAcquisition() override;
+
     /** Calibration progress of a stream: 0..1 while calibrating, 1 when done, -1 if the stream is unknown */
     float getCalibrationProgress (uint16 streamId);
 
@@ -125,6 +129,12 @@ public:
 
 private:
     StreamSettings<RippleDetectorSettings> settings;
+
+    /** Sends a UDP trigger to the LaserDriver Pi on every ripple onset (all streams) */
+    LaserTrigger laserTrigger;
+
+    /** Applies the laser_* parameters to laserTrigger; the destination only if it changed */
+    void configureLaserTrigger (bool destinationChanged);
 
     /** Marks the current parameter values to be pushed to the stream's method */
     void applyParams (uint16 streamId);

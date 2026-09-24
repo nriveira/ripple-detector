@@ -116,6 +116,33 @@ Adaptive: after calibration, the baseline keeps tracking the signal outside of d
         99999,
         1);
 
+    /* Closed-loop laser trigger (LaserDriver Pi broker, Pi/udp_trigger.py) */
+    addBooleanParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "laser_trigger",
+        "Laser Trigger",
+        "Sends a UDP datagram to the LaserDriver Pi on every ripple onset, from the same block as the TTL event. \
+The Pi broker must be started with --udp-trigger-port and must allow this computer's address.",
+        false);
+
+    addStringParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "laser_host",
+        "Laser Host",
+        "Numeric IPv4 address of the LaserDriver Pi",
+        "",
+        true);
+
+    addIntParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "laser_port",
+        "Laser Port",
+        "UDP port of the LaserDriver Pi broker's trigger listener (--udp-trigger-port)",
+        LaserTriggerPacket::DEFAULT_PORT,
+        1,
+        65535,
+        true);
+
     /* EMG / ACC Movement Detection Settings */
     addCategoricalParameter (
         Parameter::STREAM_SCOPE,
@@ -179,6 +206,7 @@ Adaptive: after calibration, the baseline keeps tracking the signal outside of d
 void RippleDetector::updateSettings()
 {
     settings.update (getDataStreams());
+    configureLaserTrigger (true);
 
     for (auto stream : getDataStreams())
     {
@@ -356,9 +384,47 @@ void RippleDetector::applyParams (uint16 streamId)
     settings[streamId]->paramsDirty = true;
 }
 
+void RippleDetector::configureLaserTrigger (bool destinationChanged)
+{
+    // The destination is only rewritten from laser_host / laser_port, which are
+    // locked during acquisition, so fire() on the audio thread never sees it change.
+    // The on/off switch can flip at any time and only touches an atomic.
+    if (destinationChanged)
+        laserTrigger.configure (getParameter ("laser_host")->getValueAsString(),
+                                (int) getParameter ("laser_port")->getValue());
+
+    const bool enabled = (bool) getParameter ("laser_trigger")->getValue();
+    laserTrigger.setEnabled (enabled);
+
+    if (enabled && ! laserTrigger.isActive())
+    {
+        LOGE ("Laser Trigger: \"", getParameter ("laser_host")->getValueAsString(),
+              "\" is not a numeric IPv4 address; no triggers will be sent");
+        CoreServices::sendStatusMessage ("Laser Trigger: set Laser Host to the Pi's IPv4 address");
+    }
+}
+
+bool RippleDetector::stopAcquisition()
+{
+    if (laserTrigger.getSent() > 0 || laserTrigger.getFailed() > 0)
+        LOGC ("Laser Trigger: ", (int) laserTrigger.getSent(), " sent, ", (int) laserTrigger.getFailed(), " failed so far");
+
+    return true;
+}
+
 void RippleDetector::parameterValueChanged (Parameter* param)
 {
     String paramName = param->getName();
+
+    if (param->getScope() == Parameter::PROCESSOR_SCOPE)
+    {
+        if (paramName.equalsIgnoreCase ("laser_trigger"))
+            configureLaserTrigger (false);
+        else if (paramName.startsWithIgnoreCase ("laser_"))
+            configureLaserTrigger (true);
+        return;
+    }
+
     uint16 streamId = param->getStreamId();
     RippleDetectorSettings* s = settings[streamId];
 
@@ -704,6 +770,10 @@ void RippleDetector::publishFeatures (uint16 streamId, int numSamples)
 void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex, int64 firstSample)
 {
     RippleDetectorSettings* s = settings[streamId];
+
+    // The datagram goes first: it is the latency path to the stimulus
+    if (state)
+        laserTrigger.fire (firstSample + sampleIndex);
 
     addEvent (s->createEvent (s->rippleOutputChannel, firstSample + sampleIndex, state), sampleIndex);
     s->rippleTtlHigh = state;

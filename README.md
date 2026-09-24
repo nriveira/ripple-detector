@@ -55,16 +55,32 @@ With the **Features** toggle (parameter `feature_out`) the plugin appends three 
 
 The channels are typed as electrode channels and use the resolution (bit-volts) of the stream's first channel, so recordings keep the same scale as the input. Toggling the switch rebuilds the signal chain, which is why it is disabled during acquisition.
 
+### Closed-loop laser trigger
+
+With **Laser Trigger** on, every ripple onset also sends one UDP datagram to the [LaserDriver](https://github.com/nriveira/LaserDriver) Pi, whose broker fires the laser's fast GPIO trigger. The datagram is sent from the same processing block as the TTL event, before the event is added, so the network path adds nothing beyond one `sendto()`.
+
+| Parameter | Meaning |
+|---|---|
+| `Laser Trigger` | On/off; can be switched during acquisition |
+| `Laser Host` | Numeric IPv4 address of the Pi (no host names, so sending never waits on a lookup) |
+| `Laser Port` | The broker's `--udp-trigger-port` (default 27136) |
+
+The settings apply to every stream. On the Pi, start the broker with `--udp-trigger-port 27136 --udp-trigger-allow <this computer's IP>` (see LaserDriver `Pi/README.md`).
+
+Each datagram is 16 bytes, little-endian: `"LTR1"`, a `u32` sequence number and the `u64` sample number of the onset event. The broker counts gaps in the sequence, so a lost trigger shows up in its `udp_stats`. The layout is in `Source/LaserTriggerPacket.h` and is mirrored by LaserDriver `Pi/udp_trigger.py`, and both test suites check the same byte vector.
+
+The onset sample number is the start of the RMS window that crossed threshold, while the datagram leaves at the end of the processing block that contains it. The difference, plus the GUI's block latency, is the host-side part of the stimulation delay.
+
 ### Adding a method
 
 Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift. It needs only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift. `Tests/LaserTriggerPacketTests.cpp` checks the laser trigger datagram layout. Both need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests
 ```
 
 ## Building from source
