@@ -8,14 +8,14 @@
 #include <vector>
 
 /**
-    Single-producer / single-consumer queue that carries the z-scored features of
-    every detection method, plus per-sample status flags, from the audio thread to
-    the viewer. Samples that arrive while the queue is full are dropped.
+    Single-producer / single-consumer queue that carries the z-scored detection
+    feature, plus per-sample status flags, from the audio thread to the viewer.
+    Samples that arrive while the queue is full are dropped.
 */
 class FeatureFifo
 {
 public:
-    static constexpr int NUM_FEATURES = 3;
+    static constexpr int NUM_FEATURES = 1;
 
     enum Flags : uint8_t
     {

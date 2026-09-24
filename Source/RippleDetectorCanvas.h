@@ -13,10 +13,10 @@
 /**
     Live view of the ripple detection features.
 
-    Shows the z-scored feature of any detection method for the stream selected in the
-    editor, together with the onset / offset thresholds, detected events and the
-    movement-blocked state. The detection parameters of the stream can be edited from
-    the panel on the right.
+    Shows the z-scored RMS feature for the stream selected in the editor, together with
+    the detection threshold, detected events, the movement-blocked state and the
+    calibration progress. The detection parameters of the stream can be edited from the
+    panel on the right.
 */
 class RippleDetectorCanvas : public Visualizer,
                              public ComboBox::Listener,
@@ -86,9 +86,6 @@ private:
     /** Drains the processor queues of every stream into the display rings */
     void pullData (bool discard);
 
-    /** Index of the feature to display, resolving "Active method" */
-    int displayedFeature() const;
-
     void drawPlot (Graphics& g);
     void addParameterRow (const String& name, bool comboBox);
     void updateParameterVisibility();
@@ -97,14 +94,16 @@ private:
     std::map<uint16, StreamDisplay> displays;
 
     std::unique_ptr<Label> streamLabel;
-    std::unique_ptr<Label> featureLabel;
-    std::unique_ptr<ComboBox> featureCombo;
     std::unique_ptr<Label> rangeLabel;
     std::unique_ptr<ComboBox> rangeCombo;
     std::unique_ptr<Label> windowLabel;
     std::unique_ptr<ComboBox> windowCombo;
     std::unique_ptr<Label> panelTitle;
     std::unique_ptr<UtilityButton> calibrateButton;
+    std::unique_ptr<Label> statsLabel;
+
+    /** Updates the calibrate button text and the baseline read-out */
+    void updateCalibrationInfo();
 
     Rectangle<int> plotArea;
 

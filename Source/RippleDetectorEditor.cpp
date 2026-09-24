@@ -7,6 +7,12 @@ static const int ROW_PITCH = 21;
 static const int ROW_Y[5] = { 24, 24 + ROW_PITCH, 24 + 2 * ROW_PITCH, 24 + 3 * ROW_PITCH, 24 + 4 * ROW_PITCH };
 static const int TEXT_WIDTH = 150;
 
+static const String CALIBRATE_TOOLTIP =
+    "Estimates the baseline of the ripple channel: for 20 s the RMS of every window is collected and its mean and "
+    "standard deviation are computed. The detection threshold is mean + Onset Std Dev x SD. No ripples are reported "
+    "while calibrating. Calibration runs automatically when acquisition starts and when the movement channels change; "
+    "press to run it again, e.g. after moving the electrode or changing the filter.";
+
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     : VisualizerEditor (parentNode, "Ripple Detector", 605)
@@ -29,42 +35,34 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     calibrateButton = std::make_unique<UtilityButton> ("CALIBRATE");
     calibrateButton->addListener (this);
     calibrateButton->setRadius (3.0f);
+    calibrateButton->setTooltip (CALIBRATE_TOOLTIP);
     calibrateButton->setBounds (col1, 92, 80, 16);
     addAndMakeVisible (calibrateButton.get());
 
     // Custom toggle for the "feature_out" parameter: a ToggleParameterEditor does not fit in this column
     featureToggle = std::make_unique<ToggleButton> ("Features");
-    featureToggle->setTooltip ("Add the detection feature and thresholds to the stream as continuous channels (RIP_FEAT, RIP_ON, RIP_OFF), e.g. for recording. Rebuilds the signal chain. Not needed for the built-in viewer.");
+    featureToggle->setTooltip ("Add the RMS feature, the detection threshold and a detected-events pulse to the stream as continuous channels (RIP_FEAT, RIP_THR, RIP_EVENT), e.g. for the LFP Viewer or for recording. Rebuilds the signal chain.");
     featureToggle->addListener (this);
     featureToggle->setBounds (col1 - 2, 109, 86, 16);
     addAndMakeVisible (featureToggle.get());
 
-    /* Column 2: method and shared detection settings */
+    /* Column 2: detection settings */
     int col2 = 98;
 
-    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "method", col2, ROW_Y[0]);
-    ParameterEditor* method = getParameterEditor ("method");
-    method->setLayout (ParameterEditor::Layout::nameOnLeft);
-    method->setSize (TEXT_WIDTH, ROW_HEIGHT);
+    addRow ("ripple_std", col2, ROW_Y[0]);
+    addRow ("time_thresh", col2, ROW_Y[1]);
+    addRow ("refr_time", col2, ROW_Y[2]);
+    addRow ("rms_samples", col2, ROW_Y[3]);
 
-    addRow ("ripple_std", col2, ROW_Y[1]);
-    addRow ("time_thresh", col2, ROW_Y[2]);
-    addRow ("refr_time", col2, ROW_Y[3]);
-    addRow ("rms_samples", col2, ROW_Y[4]);
-
-    /* Column 3: method-specific settings and baseline mode */
+    /* Column 3: baseline mode */
     int col3 = 255;
 
-    addRow ("smooth_ms", col3, ROW_Y[0]);
-    addRow ("ripple_std_off", col3, ROW_Y[1]);
-    addRow ("max_dur", col3, ROW_Y[2]);
-
-    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "baseline", col3, ROW_Y[3]);
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "baseline", col3, ROW_Y[0]);
     ParameterEditor* baseline = getParameterEditor ("baseline");
     baseline->setLayout (ParameterEditor::Layout::nameOnLeft);
     baseline->setSize (TEXT_WIDTH, ROW_HEIGHT);
 
-    addRow ("adapt_tau", col3, ROW_Y[4]);
+    addRow ("adapt_tau", col3, ROW_Y[1]);
 
     /* Column 4 and 5: EMG / ACC movement detection settings */
     int col4 = 412;
@@ -117,11 +115,23 @@ Visualizer* RippleDetectorEditor::createNewCanvas()
     return new RippleDetectorCanvas (rippleDetector);
 }
 
+String RippleDetectorEditor::calibrateButtonText (RippleDetector* processor, uint16 streamId, bool acquiring)
+{
+    if (acquiring && processor->isCalibrating (streamId))
+    {
+        const int percent = (int) std::round (100.0f * std::max (0.0f, processor->getCalibrationProgress (streamId)));
+        return "CALIB. " + String (percent) + "%";
+    }
+
+    return "CALIBRATE";
+}
+
 void RippleDetectorEditor::buttonClicked (Button* button)
 {
     if (button == calibrateButton.get())
     {
         rippleDetector->shouldCalibrate = true;
+        timerCallback();
     }
     else if (button == featureToggle.get())
     {
@@ -134,13 +144,26 @@ void RippleDetectorEditor::buttonClicked (Button* button)
 void RippleDetectorEditor::startAcquisition()
 {
     featureToggle->setEnabled (false);
+    startTimer (200);
     enable();
 }
 
 void RippleDetectorEditor::stopAcquisition()
 {
+    stopTimer();
     featureToggle->setEnabled (true);
+    calibrateButton->setLabel ("CALIBRATE");
+    calibrateButton->setEnabledState (true);
     disable();
+}
+
+void RippleDetectorEditor::timerCallback()
+{
+    const uint16 streamId = getCurrentStream();
+    const bool calibrating = acquisitionIsActive && rippleDetector->isCalibrating (streamId);
+
+    calibrateButton->setLabel (calibrateButtonText (rippleDetector, streamId, acquisitionIsActive));
+    calibrateButton->setEnabledState (! calibrating);
 }
 
 // Called when settings are updated
@@ -160,16 +183,6 @@ void RippleDetectorEditor::selectedStreamHasChanged()
 
 void RippleDetectorEditor::updateMethodView()
 {
-    const String method = rippleDetector->getMethodName (getCurrentStream());
-    const bool usesHysteresis = ! method.equalsIgnoreCase ("RMS");
-
-    // Envelope / TKEO parameters
-    for (auto name : { "smooth_ms", "ripple_std_off", "max_dur" })
-    {
-        if (auto* ed = getParameterEditor (name))
-            ed->setVisible (usesHysteresis);
-    }
-
     // Adaptive baseline time constant
     bool adaptive = false;
     if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
@@ -191,4 +204,6 @@ void RippleDetectorEditor::updateMethodView()
 
     featureToggle->setToggleState (featureOut, dontSendNotification);
     featureToggle->setEnabled (hasStream && ! acquisitionIsActive);
+
+    timerCallback();
 }

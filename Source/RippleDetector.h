@@ -25,21 +25,13 @@ public:
     /** Creates an event associated with ripple detection */
     TTLEventPtr createEvent (int64 outputLine, int64 sample_number, bool state);
 
-    /** Returns the method that currently emits events */
-    DetectionMethod* activeMethod() const { return methods[(size_t) activeMethodIndex.load()].get(); }
-
     // --- Ripple detection ---
-    // Every method runs on every block so that the viewer can show any feature and
-    // switching methods does not require a new calibration. Only the active one emits events.
-    std::vector<std::unique_ptr<DetectionMethod>> methods; // One instance per entry of getDetectionMethodNames()
-    std::atomic<int> activeMethodIndex { 0 }; // Index of the method that emits events
-    DetectionParams params; // Parameters handed to every method
-    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the methods
-    std::atomic<bool> methodChanged { false }; // active method changed since the last block
-    std::vector<DetectionEvent> events; // Scratch buffer for events produced by the active method
-    std::vector<DetectionEvent> shadowEvents; // Discarded events of the non-active methods
-    std::array<std::vector<float>, FeatureFifo::NUM_FEATURES> featureScratch; // Per-method feature values for the block
-    std::array<std::vector<float>, FeatureFifo::NUM_FEATURES> zScratch; // Z-scored feature values for the block
+    std::unique_ptr<DetectionMethod> method; // The RMS detection algorithm
+    DetectionParams params; // Parameters handed to the method
+    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the method
+    std::vector<DetectionEvent> events; // Scratch buffer for events produced in the current block
+    std::vector<float> featureScratch; // Feature values for the block
+    std::vector<float> zScratch; // Z-scored feature values for the block
     std::vector<uint8_t> flagScratch; // Per-sample status flags for the block
     FeatureFifo viewerFifo; // Hands features to the viewer
 
@@ -50,15 +42,16 @@ public:
     // --- Feature output (derived continuous channels) ---
     bool featureOutputRequested { false }; // Value of the "feature_out" parameter
     bool featureOutputActive { false }; // Derived channels exist for this stream
-    ContinuousChannel* featureChannel { nullptr }; // Smoothed feature the active method thresholds
-    ContinuousChannel* onsetThresholdChannel { nullptr }; // Current onset threshold
-    ContinuousChannel* offsetThresholdChannel { nullptr }; // Current offset threshold
+    ContinuousChannel* featureChannel { nullptr }; // RIP_FEAT: the RMS feature
+    ContinuousChannel* thresholdChannel { nullptr }; // RIP_THR: baseline mean + x SD
+    ContinuousChannel* eventChannelOut { nullptr }; // RIP_EVENT: threshold-height pulse while a ripple is detected
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
     bool calibrate { false }; // Per-stream request to recalibrate
     int pointsProcessed { 0 }; // Samples processed during the current calibration
     int calibrationPoints { 0 }; // Samples that define the calibration duration
+    std::atomic<float> calibrationProgress { 0.0f }; // 0..1 while calibrating, 1 afterwards (read by the UI)
 
     // --- Movement detection (EMG / accelerometer) ---
     String movSwitch { "OFF" }; // Movement detection mode (OFF / ACC / EMG)
@@ -112,8 +105,15 @@ public:
     /** Called when a parameter is updated */
     void parameterValueChanged (Parameter* param) override;
 
-    /** Returns the name of the detection method selected for a stream */
-    String getMethodName (uint16 streamId);
+    /** Calibration progress of a stream: 0..1 while calibrating, 1 when done, -1 if the stream is unknown */
+    float getCalibrationProgress (uint16 streamId);
+
+    /** True while the stream is estimating its baseline */
+    bool isCalibrating (uint16 streamId);
+
+    /** Baseline statistics of a stream (0 if unknown or still calibrating) */
+    double getBaselineMean (uint16 streamId);
+    double getBaselineStd (uint16 streamId);
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);
@@ -126,22 +126,19 @@ public:
 private:
     StreamSettings<RippleDetectorSettings> settings;
 
-    /** Switches the method that emits events for a stream */
-    void selectMethod (uint16 streamId, const String& methodName);
-
-    /** Marks the current parameter values to be pushed to the stream's methods */
+    /** Marks the current parameter values to be pushed to the stream's method */
     void applyParams (uint16 streamId);
 
-    /** Asks the editor to show the parameters relevant for the current method */
+    /** Asks the editor to refresh its custom controls */
     void refreshEditor();
 
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);
 
-    /** Runs every method on the ripple channel and emits the active method's events */
-    void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut);
+    /** Runs the method on the ripple channel and emits its events */
+    void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
 
-    /** Z-scores the block's features and hands them to the viewer queue */
+    /** Z-scores the block's feature and hands it to the viewer queue */
     void publishFeatures (uint16 streamId, int numSamples);
 
     /** Computes movement RMS windows for one block and updates pluginEnabled */

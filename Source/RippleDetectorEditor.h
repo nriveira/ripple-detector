@@ -6,7 +6,8 @@
 #include "RippleDetector.h"
 
 class RippleDetectorEditor : public VisualizerEditor,
-                             public Button::Listener
+                             public Button::Listener,
+                             public Timer
 {
 public:
     RippleDetectorEditor (GenericProcessor* parentNode);
@@ -21,8 +22,14 @@ public:
     void startAcquisition() override;
     void stopAcquisition() override;
 
-    /** Shows only the parameters used by the selected stream's detection method */
+    /** Polls the calibration state while acquiring */
+    void timerCallback() override;
+
+    /** Refreshes the custom controls for the selected stream */
     void updateMethodView();
+
+    /** Text for a calibrate button given the stream's calibration state */
+    static String calibrateButtonText (RippleDetector* processor, uint16 streamId, bool acquiring);
 
 private:
     RippleDetector* rippleDetector;

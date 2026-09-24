@@ -6,15 +6,15 @@
 #include "TkeoMethod.h"
 
 /**
-    Maps the "method" parameter to a DetectionMethod instance.
+    Maps a method name to a DetectionMethod instance.
 
-    To add a method: implement a DetectionMethod subclass, add its name to
-    getDetectionMethodNames() and construct it in createDetectionMethod(). The names
-    must match the categories of the "method" parameter in RippleDetector::registerParameters().
+    The plugin currently exposes only the RMS method. The Envelope and TKEO
+    implementations are kept (and unit-tested) for future use; to expose one, add its
+    name to getDetectionMethodNames() and reintroduce a "method" parameter.
 */
 inline Array<String> getDetectionMethodNames()
 {
-    return { "RMS", "Envelope", "TKEO" };
+    return { "RMS" };
 }
 
 inline std::unique_ptr<DetectionMethod> createDetectionMethod (const String& name)

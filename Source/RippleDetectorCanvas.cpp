@@ -1,5 +1,5 @@
 #include "RippleDetectorCanvas.h"
-#include "DetectionMethods/DetectionMethodFactory.h"
+#include "RippleDetectorEditor.h"
 
 #include <cfloat>
 #include <cmath>
@@ -12,7 +12,6 @@ const float Y_MIN = -3.0f; // SD; features are non-negative so they rarely go be
 
 const Colour TRACE_COLOUR (0x50, 0xa8, 0xff);
 const Colour ONSET_COLOUR (0xff, 0x50, 0x50);
-const Colour OFFSET_COLOUR (0xff, 0xb0, 0x40);
 const Colour EVENT_COLOUR (0x40, 0xd0, 0x70);
 const Colour BLOCKED_COLOUR (0xff, 0x90, 0x20);
 const Colour CALIBRATING_COLOUR (0x90, 0x90, 0x90);
@@ -101,19 +100,6 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     streamLabel->setFont (FontOptions ("Inter", "Medium", 15.0f));
     addAndMakeVisible (streamLabel.get());
 
-    featureLabel = std::make_unique<Label> ("FeatureLabel", "Feature:");
-    featureLabel->setFont (labelFont);
-    addAndMakeVisible (featureLabel.get());
-
-    featureCombo = std::make_unique<ComboBox> ("Feature");
-    featureCombo->addItem ("Active method", 1);
-    int id = 2;
-    for (const auto& name : getDetectionMethodNames())
-        featureCombo->addItem (name, id++);
-    featureCombo->setSelectedId (1, dontSendNotification);
-    featureCombo->addListener (this);
-    addAndMakeVisible (featureCombo.get());
-
     rangeLabel = std::make_unique<Label> ("RangeLabel", "Range:");
     rangeLabel->setFont (labelFont);
     addAndMakeVisible (rangeLabel.get());
@@ -141,21 +127,24 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     panelTitle->setFont (FontOptions ("Inter", "Medium", 15.0f));
     addAndMakeVisible (panelTitle.get());
 
-    addParameterRow ("method", true);
     addParameterRow ("ripple_std", false);
-    addParameterRow ("ripple_std_off", false);
     addParameterRow ("time_thresh", false);
     addParameterRow ("refr_time", false);
-    addParameterRow ("max_dur", false);
-    addParameterRow ("smooth_ms", false);
     addParameterRow ("rms_samples", false);
     addParameterRow ("baseline", true);
     addParameterRow ("adapt_tau", false);
 
     calibrateButton = std::make_unique<UtilityButton> ("CALIBRATE");
     calibrateButton->setRadius (3.0f);
+    calibrateButton->setTooltip ("Re-estimate the baseline mean and SD of the RMS over 20 s. No ripples are reported while calibrating.");
     calibrateButton->addListener (this);
     addAndMakeVisible (calibrateButton.get());
+
+    statsLabel = std::make_unique<Label> ("Stats", "");
+    statsLabel->setFont (FontOptions ("Inter", "Regular", 13.0f));
+    statsLabel->setJustificationType (Justification::topLeft);
+    statsLabel->setMinimumHorizontalScale (1.0f);
+    addAndMakeVisible (statsLabel.get());
 }
 
 void RippleDetectorCanvas::addParameterRow (const String& name, bool comboBox)
@@ -182,23 +171,6 @@ uint16 RippleDetectorCanvas::currentStreamId() const
     return processor->getEditor()->getCurrentStream();
 }
 
-int RippleDetectorCanvas::displayedFeature() const
-{
-    const int selected = featureCombo->getSelectedId();
-
-    if (selected >= 2)
-        return std::min (NUM_FEATURES - 1, selected - 2);
-
-    // "Active method": follow the stream's method parameter
-    const String method = processor->getMethodName (currentStreamId());
-    const Array<String> names = getDetectionMethodNames();
-    for (int i = 0; i < names.size(); i++)
-        if (names[i].equalsIgnoreCase (method))
-            return std::min (NUM_FEATURES - 1, i);
-
-    return 0;
-}
-
 void RippleDetectorCanvas::updateSettings()
 {
     const uint16 streamId = currentStreamId();
@@ -221,18 +193,45 @@ void RippleDetectorCanvas::updateSettings()
     displays = std::move (kept);
 
     updateParameterVisibility();
+    updateCalibrationInfo();
     repaint();
+}
+
+void RippleDetectorCanvas::updateCalibrationInfo()
+{
+    const uint16 streamId = currentStreamId();
+    const bool acquiring = processor->getEditor() != nullptr && processor->getEditor()->acquisitionIsActive;
+    const bool calibrating = acquiring && processor->isCalibrating (streamId);
+
+    calibrateButton->setLabel (RippleDetectorEditor::calibrateButtonText (processor, streamId, acquiring));
+    calibrateButton->setEnabledState (! calibrating);
+
+    String text;
+    if (streamId == 0)
+    {
+        text = "";
+    }
+    else if (calibrating)
+    {
+        const int percent = (int) std::round (100.0f * std::max (0.0f, processor->getCalibrationProgress (streamId)));
+        text = "Calibrating: collecting RMS windows (" + String (percent) + "% of 20 s).\nNo ripples are reported until this finishes.";
+    }
+    else if (const DetectionParams* params = processor->getStreamParams (streamId))
+    {
+        const double mean = processor->getBaselineMean (streamId);
+        const double sd = processor->getBaselineStd (streamId);
+        if (sd > 0.0)
+            text = "Baseline RMS: mean " + String (mean, 2) + ", SD " + String (sd, 2)
+                   + "\nThreshold: " + String (mean + params->onsetSds * sd, 2) + " (mean + " + String (params->onsetSds, 1) + " SD)";
+        else
+            text = "Not calibrated yet. Calibration starts\nautomatically with acquisition.";
+    }
+
+    statsLabel->setText (text, dontSendNotification);
 }
 
 void RippleDetectorCanvas::updateParameterVisibility()
 {
-    const String method = processor->getMethodName (currentStreamId());
-    const bool usesHysteresis = ! method.equalsIgnoreCase ("RMS");
-
-    for (auto name : { "smooth_ms", "ripple_std_off", "max_dur" })
-        if (auto* ed = getParameterEditor (name))
-            ed->setVisible (usesHysteresis);
-
     bool adaptive = false;
     if (auto* stream = processor->getDataStream (currentStreamId()))
         if (auto* p = stream->getParameter ("baseline"))
@@ -259,6 +258,7 @@ void RippleDetectorCanvas::endAnimation()
 void RippleDetectorCanvas::refresh()
 {
     pullData (false);
+    updateCalibrationInfo();
     repaint (plotArea);
 }
 
@@ -307,9 +307,6 @@ void RippleDetectorCanvas::resized()
     int x = 10;
     streamLabel->setBounds (x, 8, 260, 20);
     x += 270;
-    featureLabel->setBounds (x, 8, 60, 20);
-    featureCombo->setBounds (x + 60, 8, 130, 20);
-    x += 200;
     rangeLabel->setBounds (x, 8, 55, 20);
     rangeCombo->setBounds (x + 55, 8, 80, 20);
     x += 145;
@@ -331,6 +328,7 @@ void RippleDetectorCanvas::resized()
     }
 
     calibrateButton->setBounds (panelX, y + 6, 100, 22);
+    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 60);
 
     plotArea = Rectangle<int> (10, TOOLBAR_HEIGHT + 10, width - PANEL_WIDTH - 20, height - TOOLBAR_HEIGHT - 20);
 }
@@ -363,7 +361,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     const float yMin = Y_MIN;
     const int windowSeconds = windowCombo->getSelectedId();
     const size_t numBins = (size_t) (windowSeconds * 1000 / BIN_MS);
-    const int feature = displayedFeature();
+    const int feature = 0;
 
     auto yFor = [&] (float z)
     {
@@ -444,22 +442,15 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         }
     }
 
-    // Threshold lines
+    // Threshold line (mean + x SD, i.e. x in these units)
     if (const DetectionParams* params = processor->getStreamParams (streamId))
     {
         const float onset = (float) params->onsetSds;
-        const float offset = (float) std::min (params->offsetSds, params->onsetSds);
 
         g.setColour (ONSET_COLOUR);
         g.drawHorizontalLine ((int) yFor (onset), (float) plot.getX(), (float) plot.getRight());
-
-        if (feature != 0) // RMS has no separate offset threshold
-        {
-            g.setColour (OFFSET_COLOUR);
-            const float y = yFor (offset);
-            for (int x = plot.getX(); x < plot.getRight(); x += 8)
-                g.drawHorizontalLine ((int) y, (float) x, (float) std::min (x + 4, plot.getRight()));
-        }
+        g.setFont (FontOptions ("Inter", "Regular", 12.0f));
+        g.drawText ("threshold: " + String (onset, 1) + " SD", plot.getRight() - 130, (int) yFor (onset) - 16, 126, 14, Justification::centredRight);
     }
 
     // Zero line
@@ -491,8 +482,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     }
 
     // Legend and status
-    const Array<String> names = getDetectionMethodNames();
-    String legend = names[std::min (feature, names.size() - 1)] + " (baseline SD)";
+    String legend = "RMS (baseline SD)";
     g.setFont (FontOptions ("Inter", "Medium", 13.0f));
     g.setColour (TRACE_COLOUR);
     g.drawText (legend, plot.getX() + 8, plot.getY() + 4, 260, 18, Justification::centredLeft);
@@ -522,14 +512,12 @@ void RippleDetectorCanvas::buttonClicked (Button* button)
 
 void RippleDetectorCanvas::saveCustomParametersToXml (XmlElement* xml)
 {
-    xml->setAttribute ("feature", featureCombo->getSelectedId());
     xml->setAttribute ("range", rangeCombo->getSelectedId());
     xml->setAttribute ("window", windowCombo->getSelectedId());
 }
 
 void RippleDetectorCanvas::loadCustomParametersFromXml (XmlElement* xml)
 {
-    featureCombo->setSelectedId (xml->getIntAttribute ("feature", 1), dontSendNotification);
     rangeCombo->setSelectedId (xml->getIntAttribute ("range", 20), dontSendNotification);
     windowCombo->setSelectedId (xml->getIntAttribute ("window", 5), dontSendNotification);
 }
