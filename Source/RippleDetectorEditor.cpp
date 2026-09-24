@@ -279,6 +279,17 @@ void RippleDetectorEditor::updateMethodView()
     if (auto* ed = getParameterEditor ("adapt_tau"))
         ed->setVisible (adaptive);
 
+    // Movement settings only matter while movement detection is on. Mov. Input
+    // stays visible: channels must be chosen before ACC / EMG can be selected.
+    bool movement = false;
+    if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
+        if (auto* p = stream->getParameter ("mov_detect"))
+            movement = ! p->getValueAsString().equalsIgnoreCase ("OFF");
+
+    for (auto* name : { "Mov_Out", "mov_std", "min_time_st", "min_time_mov" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (movement);
+
     // Feature output toggle reflects the selected stream
     bool featureOut = false;
     bool hasStream = false;

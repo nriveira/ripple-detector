@@ -545,6 +545,7 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         }
         s->movSwitchEnabled = ! (s->movSwitch).equalsIgnoreCase ("OFF");
         s->movChannChanged = true;
+        refreshEditor();
     }
     else if (paramName.equalsIgnoreCase ("mov_input"))
     {

@@ -32,7 +32,7 @@ Notes:
 - *Fixed* (default): the calibration values are used until the next calibration.
 - *Adaptive*: the mean and standard deviation keep tracking the signal outside of detected events with an exponential time constant of `Adapt Tau` seconds, so the threshold follows slow drifts in signal amplitude during long sessions.
 
-Movement gating (EMG / accelerometer) blocks ripple events while movement is detected. When movement blocks detection, a ripple TTL that is currently high is forced low.
+Movement gating (EMG / accelerometer) blocks ripple events while movement is detected. When movement blocks detection, a ripple TTL that is currently high is forced low. While `Mov. Detect` is OFF the editor hides the movement settings except `Mov. Input`, which must be set before ACC or EMG can be selected.
 
 ### Viewing the detection feature
 
