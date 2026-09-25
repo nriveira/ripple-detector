@@ -8,9 +8,14 @@ namespace
 {
 const int RANGE_OPTIONS[] = { 5, 10, 20, 50, 100, 200 }; // SD
 const int WINDOW_OPTIONS[] = { 2, 5, 10, 30 }; // seconds
+const int RAW_RANGE_OPTIONS[] = { 50, 100, 200, 500, 1000, 2000, 5000 }; // +/- uV
+const float RAW_FRACTION = 0.3f; // share of the plot height given to the raw trace
 const float Y_MIN = -3.0f; // SD; features are non-negative so they rarely go below this
 
 const Colour TRACE_COLOUR (0x50, 0xa8, 0xff);
+const Colour NOISE_COLOUR (0xc0, 0x78, 0xff);
+const Colour VETO_COLOUR (0xff, 0x40, 0xa0);
+const Colour RAW_COLOUR (0xd0, 0xd0, 0xd0);
 const Colour ONSET_COLOUR (0xff, 0x50, 0x50);
 const Colour EVENT_COLOUR (0x40, 0xd0, 0x70);
 const Colour BLOCKED_COLOUR (0xff, 0x90, 0x20);
@@ -122,6 +127,17 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     windowCombo->addListener (this);
     addAndMakeVisible (windowCombo.get());
 
+    rawRangeLabel = std::make_unique<Label> ("RawRangeLabel", "Raw:");
+    rawRangeLabel->setFont (labelFont);
+    addAndMakeVisible (rawRangeLabel.get());
+
+    rawRangeCombo = std::make_unique<ComboBox> ("RawRange");
+    for (int r : RAW_RANGE_OPTIONS)
+        rawRangeCombo->addItem (String::fromUTF8 ("\xc2\xb1") + String (r) + String::fromUTF8 (" \xc2\xb5V"), r);
+    rawRangeCombo->setSelectedId (500, dontSendNotification);
+    rawRangeCombo->addListener (this);
+    addAndMakeVisible (rawRangeCombo.get());
+
     // Parameter panel: the same stream-scoped parameters as the editor
     panelTitle = std::make_unique<Label> ("PanelTitle", "Detection settings");
     panelTitle->setFont (FontOptions ("Inter", "Medium", 15.0f));
@@ -221,10 +237,22 @@ void RippleDetectorCanvas::updateCalibrationInfo()
         const double mean = processor->getBaselineMean (streamId);
         const double sd = processor->getBaselineStd (streamId);
         if (sd > 0.0)
+        {
             text = "Baseline RMS: mean " + String (mean, 2) + ", SD " + String (sd, 2)
                    + "\nThreshold: " + String (mean + params->onsetSds * sd, 2) + " (mean + " + String (params->onsetSds, 1) + " SD)";
+
+            const double noiseSd = processor->getNoiseBaselineStd (streamId);
+            if (processor->hasNoiseChannel (streamId) && noiseSd > 0.0)
+            {
+                const double noiseMean = processor->getNoiseBaselineMean (streamId);
+                text += "\nNoise RMS: mean " + String (noiseMean, 2) + ", SD " + String (noiseSd, 2)
+                        + "\nVetoed by noise: " + String ((int) processor->getVetoedOnsets (streamId));
+            }
+        }
         else
+        {
             text = "Not calibrated yet. Calibration starts\nautomatically with acquisition.";
+        }
     }
 
     statsLabel->setText (text, dontSendNotification);
@@ -312,6 +340,9 @@ void RippleDetectorCanvas::resized()
     x += 145;
     windowLabel->setBounds (x, 8, 60, 20);
     windowCombo->setBounds (x + 60, 8, 70, 20);
+    x += 140;
+    rawRangeLabel->setBounds (x, 8, 40, 20);
+    rawRangeCombo->setBounds (x + 40, 8, 95, 20);
 
     // Parameter panel
     const int panelX = width - PANEL_WIDTH + 15;
@@ -328,7 +359,7 @@ void RippleDetectorCanvas::resized()
     }
 
     calibrateButton->setBounds (panelX, y + 6, 100, 22);
-    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 60);
+    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 90);
 
     plotArea = Rectangle<int> (10, TOOLBAR_HEIGHT + 10, width - PANEL_WIDTH - 20, height - TOOLBAR_HEIGHT - 20);
 }
@@ -345,11 +376,114 @@ void RippleDetectorCanvas::paint (Graphics& g)
     drawPlot (g);
 }
 
-void RippleDetectorCanvas::drawPlot (Graphics& g)
+bool RippleDetectorCanvas::columnStats (const StreamDisplay* display, size_t numBins, int width, int px, int feature,
+                                        float& mn, float& mx, uint8_t& flags)
+{
+    // Bins covered by this pixel column, oldest on the left
+    const size_t b0 = (size_t) ((double) px * (double) numBins / (double) width);
+    size_t b1 = (size_t) ((double) (px + 1) * (double) numBins / (double) width);
+    if (b1 <= b0)
+        b1 = b0 + 1;
+
+    mn = FLT_MAX;
+    mx = -FLT_MAX;
+    flags = 0;
+    bool any = false;
+
+    for (size_t b = b0; b < b1; b++)
+    {
+        const Bin* bin = display->fromNewest (numBins - 1 - b);
+        if (bin == nullptr || bin->mn[(size_t) feature] > bin->mx[(size_t) feature])
+            continue;
+
+        mn = std::min (mn, bin->mn[(size_t) feature]);
+        mx = std::max (mx, bin->mx[(size_t) feature]);
+        flags |= bin->flags;
+        any = true;
+    }
+
+    return any;
+}
+
+void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins)
 {
     const int axisLeft = 44;
+    Rectangle<int> plot = area.withTrimmedLeft (axisLeft);
+    if (plot.getWidth() <= 0 || plot.getHeight() <= 0)
+        return;
+
+    g.setColour (findColour (ThemeColours::windowBackground));
+    g.fillRect (plot);
+
+    const float range = (float) rawRangeCombo->getSelectedId();
+    auto yFor = [&] (float uv)
+    {
+        const float t = (uv + range) / (2.0f * range);
+        return (float) plot.getBottom() - t * (float) plot.getHeight();
+    };
+
+    if (display != nullptr && display->count > 0)
+    {
+        const int w = plot.getWidth();
+        for (int px = 0; px < w; px++)
+        {
+            float mn, mx;
+            uint8_t flags;
+            if (! columnStats (display, numBins, w, px, FeatureFifo::RAW, mn, mx, flags))
+                continue;
+
+            const int x = plot.getX() + px;
+            if (flags & FeatureFifo::TTL_HIGH)
+            {
+                g.setColour (EVENT_COLOUR.withAlpha (0.35f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+            if (flags & FeatureFifo::VETOED)
+            {
+                g.setColour (VETO_COLOUR.withAlpha (0.35f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+
+            const float yTop = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mx));
+            const float yBottom = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mn));
+            g.setColour (RAW_COLOUR);
+            g.drawVerticalLine (x, yTop, std::max (yBottom, yTop + 1.0f));
+        }
+    }
+
+    g.setColour (findColour (ThemeColours::outline).withAlpha (0.6f));
+    g.drawHorizontalLine ((int) yFor (0.0f), (float) plot.getX(), (float) plot.getRight());
+    g.setColour (findColour (ThemeColours::outline));
+    g.drawRect (plot);
+
+    g.setColour (findColour (ThemeColours::defaultText));
+    g.setFont (FontOptions ("Inter", "Regular", 12.0f));
+    for (float uv : { -range, 0.0f, range })
+        g.drawText (String (uv, 0), area.getX(), (int) yFor (uv) - 8, axisLeft - 6, 16, Justification::centredRight);
+
+    g.setFont (FontOptions ("Inter", "Medium", 13.0f));
+    g.setColour (RAW_COLOUR);
+    g.drawText (String::fromUTF8 ("Ripple channel (\xc2\xb5V)"), plot.getX() + 8, plot.getY() + 4, 260, 18, Justification::centredLeft);
+}
+
+void RippleDetectorCanvas::drawPlot (Graphics& g)
+{
+    const int windowSeconds = windowCombo->getSelectedId();
+    const size_t numBins = (size_t) (windowSeconds * 1000 / BIN_MS);
+
+    const uint16 streamId = currentStreamId();
+    auto it = displays.find (streamId);
+    const StreamDisplay* display = it != displays.end() ? &it->second : nullptr;
+    const bool hasNoise = processor->hasNoiseChannel (streamId);
+
+    // Raw trace on top, RMS feature below
+    const int rawHeight = (int) ((float) plotArea.getHeight() * RAW_FRACTION);
+    drawRaw (g, plotArea.withHeight (rawHeight), display, numBins);
+    const Rectangle<int> area = plotArea.withTrimmedTop (rawHeight + 8);
+
+    const int axisLeft = 44;
     const int axisBottom = 22;
-    Rectangle<int> plot = plotArea.withTrimmedLeft (axisLeft).withTrimmedBottom (axisBottom);
+    Rectangle<int> plot = area.withTrimmedLeft (axisLeft).withTrimmedBottom (axisBottom);
 
     if (plot.getWidth() <= 0 || plot.getHeight() <= 0)
         return;
@@ -359,20 +493,12 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
 
     const float yMax = (float) rangeCombo->getSelectedId();
     const float yMin = Y_MIN;
-    const int windowSeconds = windowCombo->getSelectedId();
-    const size_t numBins = (size_t) (windowSeconds * 1000 / BIN_MS);
-    const int feature = 0;
 
     auto yFor = [&] (float z)
     {
         const float t = (z - yMin) / (yMax - yMin);
         return (float) plot.getBottom() - t * (float) plot.getHeight();
     };
-
-    // Status regions and trace
-    const uint16 streamId = currentStreamId();
-    auto it = displays.find (streamId);
-    const StreamDisplay* display = it != displays.end() ? &it->second : nullptr;
 
     bool calibrating = false;
     bool blocked = false;
@@ -383,31 +509,9 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
 
         for (int px = 0; px < w; px++)
         {
-            // Bins covered by this pixel column, oldest on the left
-            const size_t b0 = (size_t) ((double) px * (double) numBins / (double) w);
-            size_t b1 = (size_t) ((double) (px + 1) * (double) numBins / (double) w);
-            if (b1 <= b0)
-                b1 = b0 + 1;
-
-            float mn = FLT_MAX;
-            float mx = -FLT_MAX;
-            uint8_t flags = 0;
-            bool any = false;
-
-            for (size_t b = b0; b < b1; b++)
-            {
-                const size_t age = numBins - 1 - b;
-                const Bin* bin = display->fromNewest (age);
-                if (bin == nullptr || bin->mn[(size_t) feature] > bin->mx[(size_t) feature])
-                    continue;
-
-                mn = std::min (mn, bin->mn[(size_t) feature]);
-                mx = std::max (mx, bin->mx[(size_t) feature]);
-                flags |= bin->flags;
-                any = true;
-            }
-
-            if (! any)
+            float mn, mx;
+            uint8_t flags;
+            if (! columnStats (display, numBins, w, px, FeatureFifo::SIGNAL_Z, mn, mx, flags))
                 continue;
 
             const int x = plot.getX() + px;
@@ -427,6 +531,32 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
                 g.setColour (EVENT_COLOUR.withAlpha (0.35f));
                 g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
             }
+            if (flags & FeatureFifo::VETOED)
+            {
+                g.setColour (VETO_COLOUR.withAlpha (0.35f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+
+            // Noise channel: its trace under the signal's, and a strip along the
+            // bottom wherever it was above threshold
+            if (hasNoise)
+            {
+                float nmn, nmx;
+                uint8_t nflags;
+                if (columnStats (display, numBins, w, px, FeatureFifo::NOISE_Z, nmn, nmx, nflags))
+                {
+                    const float nTop = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (nmx));
+                    const float nBottom = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (nmn));
+                    g.setColour (NOISE_COLOUR.withAlpha (0.8f));
+                    g.drawVerticalLine (x, nTop, std::max (nBottom, nTop + 1.0f));
+                }
+
+                if (flags & FeatureFifo::NOISE)
+                {
+                    g.setColour (NOISE_COLOUR);
+                    g.drawVerticalLine (x, (float) plot.getBottom() - 5.0f, (float) plot.getBottom());
+                }
+            }
 
             const float yTop = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mx));
             const float yBottom = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mn));
@@ -442,7 +572,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         }
     }
 
-    // Threshold line (mean + x SD, i.e. x in these units)
+    // Threshold line (mean + x SD, i.e. x in these units; the same for the noise trace)
     if (const DetectionParams* params = processor->getStreamParams (streamId))
     {
         const float onset = (float) params->onsetSds;
@@ -468,7 +598,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     for (float z = std::ceil (yMin / step) * step; z <= yMax; z += step)
     {
         const int y = (int) yFor (z);
-        g.drawText (String (z, 0), plotArea.getX(), y - 8, axisLeft - 6, 16, Justification::centredRight);
+        g.drawText (String (z, 0), area.getX(), y - 8, axisLeft - 6, 16, Justification::centredRight);
         g.drawHorizontalLine (y, (float) plot.getX(), (float) plot.getX() + 4);
     }
 
@@ -482,10 +612,17 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     }
 
     // Legend and status
-    String legend = "RMS (baseline SD)";
     g.setFont (FontOptions ("Inter", "Medium", 13.0f));
     g.setColour (TRACE_COLOUR);
-    g.drawText (legend, plot.getX() + 8, plot.getY() + 4, 260, 18, Justification::centredLeft);
+    g.drawText ("RMS (baseline SD)", plot.getX() + 8, plot.getY() + 4, 150, 18, Justification::centredLeft);
+
+    if (hasNoise)
+    {
+        g.setColour (NOISE_COLOUR);
+        g.drawText ("noise RMS (its baseline SD)", plot.getX() + 150, plot.getY() + 4, 200, 18, Justification::centredLeft);
+        g.setColour (VETO_COLOUR);
+        g.drawText ("vetoed", plot.getX() + 350, plot.getY() + 4, 60, 18, Justification::centredLeft);
+    }
 
     if (calibrating)
     {
@@ -514,10 +651,12 @@ void RippleDetectorCanvas::saveCustomParametersToXml (XmlElement* xml)
 {
     xml->setAttribute ("range", rangeCombo->getSelectedId());
     xml->setAttribute ("window", windowCombo->getSelectedId());
+    xml->setAttribute ("raw_range", rawRangeCombo->getSelectedId());
 }
 
 void RippleDetectorCanvas::loadCustomParametersFromXml (XmlElement* xml)
 {
     rangeCombo->setSelectedId (xml->getIntAttribute ("range", 20), dontSendNotification);
     windowCombo->setSelectedId (xml->getIntAttribute ("window", 5), dontSendNotification);
+    rawRangeCombo->setSelectedId (xml->getIntAttribute ("raw_range", 500), dontSendNotification);
 }

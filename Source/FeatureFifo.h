@@ -8,20 +8,28 @@
 #include <vector>
 
 /**
-    Single-producer / single-consumer queue that carries the z-scored detection
-    feature, plus per-sample status flags, from the audio thread to the viewer.
+    Single-producer / single-consumer queue that carries the viewer's traces,
+    plus per-sample status flags, from the audio thread to the viewer.
     Samples that arrive while the queue is full are dropped.
 */
 class FeatureFifo
 {
 public:
-    static constexpr int NUM_FEATURES = 1;
+    enum Feature
+    {
+        SIGNAL_Z = 0, // ripple channel feature, in its baseline SDs
+        NOISE_Z, // noise channel feature, in its own baseline SDs (0 without a noise channel)
+        RAW, // ripple channel as recorded
+        NUM_FEATURES
+    };
 
     enum Flags : uint8_t
     {
         TTL_HIGH = 1 << 0, // ripple output line is high
         CALIBRATING = 1 << 1, // baseline still being estimated
-        BLOCKED = 1 << 2 // detection blocked by movement
+        BLOCKED = 1 << 2, // detection blocked by movement
+        NOISE = 1 << 3, // noise channel above threshold
+        VETOED = 1 << 4 // a ripple onset suppressed by the noise channel
     };
 
     FeatureFifo() : fifo (1) {}

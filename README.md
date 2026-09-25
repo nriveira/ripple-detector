@@ -32,16 +32,20 @@ Notes:
 - *Fixed* (default): the calibration values are used until the next calibration.
 - *Adaptive*: the mean and standard deviation keep tracking the signal outside of detected events with an exponential time constant of `Adapt Tau` seconds, so the threshold follows slow drifts in signal amplitude during long sessions.
 
+**Noise Input** (optional) selects a channel that should not carry ripples, for example one far from the pyramidal layer or on a reference electrode. It is judged with the same method and settings as the ripple channel, against its own baseline (calibrated alongside the ripple channel). A ripple onset is vetoed, with no TTL and no laser trigger, when the noise channel is above its onset threshold in the same RMS window: an event that appears on both channels at once is treated as noise (movement, chewing, electrical artefact). Only the same window is checked, so the veto never delays a stimulus. The noise channel does not also have to satisfy `Time Thresh.`, because the ripple onset already has; with the two channels' backgrounds differing, the noise channel often completes its own duration one window later, and requiring it let common-mode bursts through in testing. A vetoed onset still starts the refractory period. Selecting or changing the noise channel recalibrates the stream, and the log reports the number of vetoed onsets at the end of each run.
+
 Movement gating (EMG / accelerometer) blocks ripple events while movement is detected. When movement blocks detection, a ripple TTL that is currently high is forced low. While `Mov. Detect` is OFF the editor hides the movement settings except `Mov. Input`, which must be set before ACC or EMG can be selected.
 
 ### Viewing the detection feature
 
 The plugin has a built-in viewer, opened with the tab / window buttons at the top right of the editor. It follows the stream selected in the editor and shows:
 
+- the ripple channel as it enters the detector, in µV, with its own **Raw** range drop-down (if the input is band-pass filtered upstream, this is the filtered signal);
 - the RMS feature in baseline standard deviations, so the detection threshold is a horizontal line at `Onset Std Dev`;
+- with a noise channel selected, its RMS in its own baseline SDs (purple, sharing the threshold line), a purple strip where it is above threshold, and vetoed onsets (pink);
 - detected events (green), periods blocked by movement (orange) and the calibration period (grey);
 - **Range** (vertical scale, in SD) and **Window** (2 to 30 s of history) drop-downs;
-- the detection parameters of the stream, a CALIBRATE button with progress, and the current baseline statistics in a panel on the right.
+- the detection parameters of the stream, a CALIBRATE button with progress, and the current baseline statistics (and the noise channel's, with its veto count) in a panel on the right.
 
 ### Streaming the detection feature
 
@@ -78,7 +82,7 @@ Detection algorithms live in `Source/DetectionMethods/` and have no dependency o
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift. `Tests/LaserTriggerHttpTests.cpp` checks the laser trigger request and the parsing of the Pi's replies. Both need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerHttpTests.cpp` checks the laser trigger request and the parsing of the Pi's replies. Both need only a C++17 compiler:
 
 ```bash
 cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests

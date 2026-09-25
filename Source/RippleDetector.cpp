@@ -32,6 +32,15 @@ void RippleDetector::registerParameters()
         "Continuous input channel on which ripples will be detected.",
         1);
 
+    addSelectedChannelsParameter (
+        Parameter::STREAM_SCOPE,
+        "Noise_Input",
+        "Noise Input",
+        "Optional channel that should not carry ripples. It is judged with the same detection settings against its own \
+baseline, and a ripple onset is suppressed (no TTL, no laser trigger) when the noise channel is above its threshold in the \
+same RMS window.",
+        1);
+
     addTtlLineParameter (
         Parameter::STREAM_SCOPE,
         "Ripple_Out",
@@ -219,6 +228,10 @@ void RippleDetector::updateSettings()
         s->method = createDetectionMethod (getDetectionMethodNames()[0]);
         s->method->setParams (s->params);
         s->method->reset();
+
+        s->noiseVeto = std::make_unique<NoiseVeto> (createDetectionMethod (getDetectionMethodNames()[0]));
+        s->noiseVeto->setParams (s->params);
+        s->noiseVeto->reset();
         s->viewerFifo.setCapacity (stream->getSampleRate(), VIEWER_FIFO_SECONDS);
 
         s->rippleTtlHigh = false;
@@ -246,6 +259,7 @@ void RippleDetector::updateSettings()
             addFeatureChannels (getDataStream (streamId));
 
         parameterValueChanged (stream->getParameter ("Ripple_Input"));
+        parameterValueChanged (stream->getParameter ("Noise_Input"));
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
         parameterValueChanged (stream->getParameter ("time_thresh"));
@@ -348,6 +362,38 @@ double RippleDetector::getBaselineStd (uint16 streamId)
     return settings[streamId]->method->getBaselineStd();
 }
 
+bool RippleDetector::hasNoiseChannel (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return false;
+
+    return settings[streamId]->noiseInputChannel >= 0;
+}
+
+double RippleDetector::getNoiseBaselineMean (uint16 streamId)
+{
+    if (! hasNoiseChannel (streamId) || settings[streamId]->isCalibrating)
+        return 0.0;
+
+    return settings[streamId]->noiseVeto->getMethod().getBaselineMean();
+}
+
+double RippleDetector::getNoiseBaselineStd (uint16 streamId)
+{
+    if (! hasNoiseChannel (streamId) || settings[streamId]->isCalibrating)
+        return 0.0;
+
+    return settings[streamId]->noiseVeto->getMethod().getBaselineStd();
+}
+
+uint32_t RippleDetector::getVetoedOnsets (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return 0;
+
+    return settings[streamId]->vetoedOnsets.load();
+}
+
 FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
@@ -404,8 +450,23 @@ void RippleDetector::configureLaserTrigger (bool destinationChanged)
     }
 }
 
+bool RippleDetector::startAcquisition()
+{
+    for (auto stream : getDataStreams())
+        settings[stream->getStreamId()]->vetoedOnsets = 0;
+
+    return true;
+}
+
 bool RippleDetector::stopAcquisition()
 {
+    for (auto stream : getDataStreams())
+    {
+        RippleDetectorSettings* s = settings[stream->getStreamId()];
+        if (s->noiseInputChannel >= 0)
+            LOGC ("Noise veto (", stream->getName(), "): ", (int) s->vetoedOnsets.load(), " ripple onsets suppressed");
+    }
+
     const auto st = laserTrigger.getStats();
 
     if (st.requested > 0)
@@ -445,6 +506,32 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         else
         {
             s->rippleInputChannel = -1;
+        }
+    }
+    else if (paramName.equalsIgnoreCase ("Noise_Input"))
+    {
+        Array<var>* array = param->getValue().getArray();
+        int channel = -1;
+
+        if (array->size() > 0)
+        {
+            int localIndex = int (array->getFirst());
+            channel = getDataStream (streamId)->getContinuousChannels()[localIndex]->getGlobalIndex();
+        }
+
+        if (channel >= 0 && channel == s->rippleInputChannel)
+        {
+            // A channel always crosses threshold with itself, which would veto every ripple
+            LOGE ("Noise Input is the same channel as Ripple Input; ignoring it");
+            CoreServices::sendStatusMessage ("Ripple Detector: the noise channel must differ from the ripple channel");
+            channel = -1;
+        }
+
+        if (channel != s->noiseInputChannel)
+        {
+            // The noise channel needs its own baseline; recalibrate the stream
+            s->noiseInputChannel = channel;
+            s->calibrate = true;
         }
     }
     else if (paramName.equalsIgnoreCase ("Ripple_Out"))
@@ -618,7 +705,10 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             continue;
 
         if (s->paramsDirty.exchange (false))
+        {
             s->method->setParams (s->params);
+            s->noiseVeto->setParams (s->params);
+        }
 
         // Enable detection again if movement detection was switched off or if calibration was requested
         if (! s->pluginEnabled && (! s->movSwitchEnabled || calibrateAll))
@@ -641,6 +731,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->calibrationProgress = 0.0f;
 
             s->method->reset();
+            s->noiseVeto->reset();
             s->movBaseline.clear();
 
             if (s->rippleTtlHigh)
@@ -653,6 +744,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->featureScratch.resize ((size_t) numSamplesInBlock);
             s->zScratch.resize ((size_t) numSamplesInBlock);
             s->flagScratch.resize ((size_t) numSamplesInBlock);
+            s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
         }
 
         // Movement gating is evaluated first so that it applies to this block's ripple events
@@ -660,13 +752,14 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             processMovement (streamId, buffer, numSamplesInBlock, firstSampleInBlock);
 
         const float* rippleData = buffer.getReadPointer (s->rippleInputChannel, 0);
-        processRipples (streamId, rippleData, numSamplesInBlock, firstSampleInBlock, featureOut, eventOut);
+        const float* noiseData = s->noiseInputChannel >= 0 ? buffer.getReadPointer (s->noiseInputChannel, 0) : nullptr;
+        processRipples (streamId, rippleData, noiseData, numSamplesInBlock, firstSampleInBlock, featureOut, eventOut);
 
         // The threshold is only defined once calibration has finished
         if (thresholdOut != nullptr && ! s->isCalibrating)
             FloatVectorOperations::fill (thresholdOut, (float) s->method->getOnsetThreshold(), numSamplesInBlock);
 
-        publishFeatures (streamId, numSamplesInBlock);
+        publishFeatures (streamId, rippleData, numSamplesInBlock);
 
         if (s->isCalibrating)
         {
@@ -678,6 +771,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
                 s->isCalibrating = false;
                 s->calibrationProgress = 1.0f;
                 s->method->finishCalibration();
+                s->noiseVeto->finishCalibration();
                 s->movBaseline.finish();
                 logCalibration (streamId);
             }
@@ -685,7 +779,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
     }
 }
 
-void RippleDetector::processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut, float* eventOut)
+void RippleDetector::processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut)
 {
     RippleDetectorSettings* s = settings[streamId];
 
@@ -696,14 +790,31 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, i
         baseFlags |= FeatureFifo::BLOCKED;
     std::fill (s->flagScratch.begin(), s->flagScratch.begin() + numSamples, baseFlags);
 
+    // Window length the methods use for this block, for marking noise / veto windows in the viewer
+    const int window = std::max (1, std::min (s->params.rmsSamples, numSamples));
+    auto markWindow = [&] (int from, uint8_t flag)
+    {
+        for (int k = from; k < std::min (from + window, numSamples); k++)
+            s->flagScratch[(size_t) k] |= flag;
+    };
+
     if (s->isCalibrating)
     {
         s->method->calibrate (rippleData, numSamples, s->featureScratch.data());
+        if (noiseData != nullptr)
+            s->noiseVeto->calibrate (noiseData, numSamples, s->noiseFeatureScratch.data());
     }
     else
     {
         s->events.clear();
         s->method->process (rippleData, numSamples, s->events, s->featureScratch.data());
+
+        if (noiseData != nullptr)
+        {
+            s->noiseVeto->process (noiseData, numSamples, s->noiseFeatureScratch.data());
+            for (int w : s->noiseVeto->getNoiseWindows())
+                markWindow (w, FeatureFifo::NOISE);
+        }
 
         // Apply the events to the TTL line and record the line state per sample
         const float eventLevel = (float) s->method->getOnsetThreshold();
@@ -724,11 +835,20 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, i
 
             if (ev.state)
             {
-                // Onsets are blocked while movement is detected
+                // Onsets are blocked while movement is detected, and vetoed when
+                // the noise channel crossed threshold in the same window
                 if (s->pluginEnabled && ! high)
                 {
-                    setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
-                    newState = true;
+                    if (noiseData != nullptr && s->noiseVeto->vetoes (ev.sampleIndex))
+                    {
+                        s->vetoedOnsets++;
+                        markWindow (ev.sampleIndex, FeatureFifo::VETOED);
+                    }
+                    else
+                    {
+                        setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+                        newState = true;
+                    }
                 }
             }
             else if (high)
@@ -754,21 +874,34 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, i
         std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
 }
 
-void RippleDetector::publishFeatures (uint16 streamId, int numSamples)
+void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, int numSamples)
 {
     RippleDetectorSettings* s = settings[streamId];
 
-    const double mean = s->method->getBaselineMean();
-    const double std = s->isCalibrating ? s->method->getRunningBaselineStd() : s->method->getBaselineStd();
-    const float scale = std > 0.0 ? (float) (1.0 / std) : 0.0f;
-    const float offset = (float) mean;
+    // Each feature in its own baseline's SDs, so both share the threshold line
+    auto zScore = [&] (const DetectionMethod& m, float* values)
+    {
+        const double mean = m.getBaselineMean();
+        const double std = s->isCalibrating ? m.getRunningBaselineStd() : m.getBaselineStd();
+        const float scale = std > 0.0 ? (float) (1.0 / std) : 0.0f;
+        const float offset = (float) mean;
+        for (int i = 0; i < numSamples; i++)
+            values[i] = (values[i] - offset) * scale;
+    };
 
-    const float* in = s->featureScratch.data();
-    float* out = s->zScratch.data();
-    for (int i = 0; i < numSamples; i++)
-        out[i] = (in[i] - offset) * scale;
+    std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, s->zScratch.begin());
+    zScore (*s->method, s->zScratch.data());
 
-    std::array<const float*, FeatureFifo::NUM_FEATURES> src { out };
+    // The noise feature is only read here once the veto has run, so it is z-scored in place
+    if (s->noiseInputChannel >= 0)
+        zScore (s->noiseVeto->getMethod(), s->noiseFeatureScratch.data());
+    else
+        std::fill (s->noiseFeatureScratch.begin(), s->noiseFeatureScratch.begin() + numSamples, 0.0f);
+
+    std::array<const float*, FeatureFifo::NUM_FEATURES> src;
+    src[FeatureFifo::SIGNAL_Z] = s->zScratch.data();
+    src[FeatureFifo::NOISE_Z] = s->noiseFeatureScratch.data();
+    src[FeatureFifo::RAW] = rippleData;
     s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
 }
 

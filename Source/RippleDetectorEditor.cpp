@@ -15,7 +15,7 @@ static const String CALIBRATE_TOOLTIP =
 
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
-    : VisualizerEditor (parentNode, "Ripple Detector", 605)
+    : VisualizerEditor (parentNode, "Ripple Detector", 693)
 {
     rippleDetector = (RippleDetector*) parentNode;
 
@@ -46,8 +46,16 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     featureToggle->setBounds (col1 - 2, 109, 86, 16);
     addAndMakeVisible (featureToggle.get());
 
+    /* Noise channel: onsets that also cross threshold here are vetoed */
+    int colNoise = 98;
+
+    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Noise_Input", colNoise, 22);
+    ParameterEditor* noiseInput = getParameterEditor ("Noise_Input");
+    noiseInput->setLayout (ParameterEditor::Layout::nameOnTop);
+    noiseInput->setSize (80, 34);
+
     /* Column 2: detection settings */
-    int col2 = 98;
+    int col2 = 186;
 
     addRow ("ripple_std", col2, ROW_Y[0]);
     addRow ("time_thresh", col2, ROW_Y[1]);
@@ -55,7 +63,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     addRow ("rms_samples", col2, ROW_Y[3]);
 
     /* Column 3: baseline mode */
-    int col3 = 255;
+    int col3 = 343;
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "baseline", col3, ROW_Y[0]);
     ParameterEditor* baseline = getParameterEditor ("baseline");
@@ -90,7 +98,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     }
 
     /* Column 4 and 5: EMG / ACC movement detection settings */
-    int col4 = 412;
+    int col4 = 500;
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_detect", col4, 22);
     ParameterEditor* movDetect = getParameterEditor ("mov_detect");
@@ -107,7 +115,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movOut->setLayout (ParameterEditor::Layout::nameOnTop);
     movOut->setSize (90, 34);
 
-    int col5 = 507;
+    int col5 = 595;
 
     addTextBoxParameterEditor (Parameter::STREAM_SCOPE, "mov_std", col5, 22);
     ParameterEditor* movStd = getParameterEditor ("mov_std");

@@ -15,6 +15,7 @@
 */
 
 #include "DetectionMethods/EnvelopeMethod.h"
+#include "DetectionMethods/NoiseVeto.h"
 #include "DetectionMethods/RmsWindowMethod.h"
 #include "DetectionMethods/TkeoMethod.h"
 
@@ -572,6 +573,113 @@ void testFeatureOutput()
         std::printf ("  %-8s feature mean during calibration %.4g (baseline %.4g)\n", name.c_str(), meanOfOutput, method->getBaselineMean());
     }
 }
+
+/** Adds a 150 Hz Hann-windowed burst: in the ripple band, so the RMS method cannot tell it from a ripple */
+void addBurst (std::vector<float>& data, int start, int length, double amplitude)
+{
+    for (int i = 0; i < length && start + i < (int) data.size(); i++)
+    {
+        const double hann = 0.5 * (1.0 - std::cos (2.0 * PI * i / (length - 1)));
+        data[(size_t) (start + i)] += (float) (amplitude * hann * std::sin (2.0 * PI * 150.0 * i / SAMPLE_RATE));
+    }
+}
+
+void testNoiseVeto()
+{
+    std::printf ("Noise channel veto\n");
+
+    const double calib = 20.0;
+    const int burstLen = (int) (0.060 * SAMPLE_RATE);
+
+    // Signal: ripples only on this channel. Noise: independent background.
+    // Common-mode bursts land on both, halfway between ripples.
+    Signal sig = makeSignal (60.0, calib, 1.5, 1.5, 50.0, false, nullptr, 42);
+    Signal noise = makeSignal (60.0, calib, 1.5, 0.0, 50.0, false, nullptr, 7);
+
+    std::vector<int> bursts;
+    for (const auto& r : sig.ripples)
+    {
+        const int b = r.start + (int) (0.75 * SAMPLE_RATE);
+        if (b + burstLen < (int) sig.data.size())
+        {
+            addBurst (sig.data, b, burstLen, 1.5);
+            addBurst (noise.data, b, burstLen, 1.5);
+            bursts.push_back (b);
+        }
+    }
+
+    for (int blockSize : { 1024, 333 })
+    {
+        RmsWindowMethod method;
+        method.setParams (defaultParams());
+        method.reset();
+
+        NoiseVeto veto (std::make_unique<RmsWindowMethod>());
+        veto.setParams (defaultParams());
+        veto.reset();
+
+        const int64_t calibrationSamples = (int64_t) (calib * SAMPLE_RATE);
+        const int64_t n = (int64_t) sig.data.size();
+        std::vector<DetectionEvent> events;
+        std::vector<int64_t> passed, vetoed;
+        bool calibrating = true;
+
+        for (int64_t pos = 0; pos < n; pos += blockSize)
+        {
+            const int len = (int) std::min<int64_t> (blockSize, n - pos);
+            const float* s = sig.data.data() + pos;
+            const float* z = noise.data.data() + pos;
+
+            if (calibrating)
+            {
+                method.calibrate (s, len, nullptr);
+                veto.calibrate (z, len);
+                if (pos + len >= calibrationSamples)
+                {
+                    method.finishCalibration();
+                    veto.finishCalibration();
+                    calibrating = false;
+                }
+                continue;
+            }
+
+            events.clear();
+            method.process (s, len, events, nullptr);
+            veto.process (z, len);
+
+            for (const auto& e : events)
+                if (e.state)
+                    (veto.vetoes (e.sampleIndex) ? vetoed : passed).push_back (pos + e.sampleIndex);
+        }
+
+        const std::string tag = "block " + std::to_string (blockSize) + ": ";
+        std::printf ("  block %4d: %zu ripples, %zu bursts -> %zu passed, %zu vetoed\n",
+                     blockSize, sig.ripples.size(), bursts.size(), passed.size(), vetoed.size());
+
+        check (passed.size() == sig.ripples.size(), tag + "every ripple passes the veto");
+        check (vetoed.size() == bursts.size(), tag + "every common-mode burst is vetoed");
+
+        bool passedInRipples = true;
+        for (auto on : passed)
+        {
+            bool inside = false;
+            for (const auto& r : sig.ripples)
+                inside = inside || (on >= r.start && on <= r.start + r.length + 300);
+            passedInRipples = passedInRipples && inside;
+        }
+        check (passedInRipples, tag + "passed onsets lie within ripples");
+
+        bool vetoedInBursts = true;
+        for (auto on : vetoed)
+        {
+            bool inside = false;
+            for (int b : bursts)
+                inside = inside || (on >= b && on <= b + burstLen + 300);
+            vetoedInBursts = vetoedInBursts && inside;
+        }
+        check (vetoedInBursts, tag + "vetoed onsets lie within bursts");
+    }
+}
 } // namespace
 
 int main()
@@ -583,6 +691,7 @@ int main()
     testAdaptiveBaseline();
     testParameterChangeMidRun();
     testFeatureOutput();
+    testNoiseVeto();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

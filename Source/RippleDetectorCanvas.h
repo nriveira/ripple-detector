@@ -13,9 +13,11 @@
 /**
     Live view of the ripple detection features.
 
-    Shows the z-scored RMS feature for the stream selected in the editor, together with
-    the detection threshold, detected events, the movement-blocked state and the
-    calibration progress. The detection parameters of the stream can be edited from the
+    Shows, for the stream selected in the editor, the ripple channel as it enters the
+    detector and, below it, the z-scored RMS feature together with the detection
+    threshold, detected events, the movement-blocked state and the calibration progress.
+    With a noise channel selected, its RMS is drawn against its own baseline and vetoed
+    onsets are marked. The detection parameters of the stream can be edited from the
     panel on the right.
 */
 class RippleDetectorCanvas : public Visualizer,
@@ -87,6 +89,13 @@ private:
     void pullData (bool discard);
 
     void drawPlot (Graphics& g);
+
+    /** Draws the ripple channel's raw trace into 'area' */
+    void drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins);
+
+    /** Min / max of one feature and the OR of the flags over the bins behind pixel column px; false if none */
+    static bool columnStats (const StreamDisplay* display, size_t numBins, int width, int px, int feature,
+                             float& mn, float& mx, uint8_t& flags);
     void addParameterRow (const String& name, bool comboBox);
     void updateParameterVisibility();
 
@@ -98,6 +107,8 @@ private:
     std::unique_ptr<ComboBox> rangeCombo;
     std::unique_ptr<Label> windowLabel;
     std::unique_ptr<ComboBox> windowCombo;
+    std::unique_ptr<Label> rawRangeLabel;
+    std::unique_ptr<ComboBox> rawRangeCombo;
     std::unique_ptr<Label> panelTitle;
     std::unique_ptr<UtilityButton> calibrateButton;
     std::unique_ptr<Label> statsLabel;

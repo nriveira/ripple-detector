@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DetectionMethods/DetectionMethod.h"
+#include "DetectionMethods/NoiseVeto.h"
 #include "FeatureFifo.h"
 #include "LaserTrigger.h"
 
@@ -37,6 +38,12 @@ public:
     FeatureFifo viewerFifo; // Hands features to the viewer
 
     int rippleInputChannel { -1 }; // Global index of the ripple input channel
+
+    // --- Noise channel veto ---
+    int noiseInputChannel { -1 }; // Global index of the noise channel, -1 if none
+    std::unique_ptr<NoiseVeto> noiseVeto; // Same method and settings, run on the noise channel
+    std::vector<float> noiseFeatureScratch; // Noise channel feature values for the block
+    std::atomic<uint32_t> vetoedOnsets { 0 }; // Onsets suppressed by the noise channel this run
     int rippleOutputChannel { 0 }; // Output TTL line for ripple events
     bool rippleTtlHigh { false }; // True while the ripple TTL line is high
 
@@ -106,7 +113,10 @@ public:
     /** Called when a parameter is updated */
     void parameterValueChanged (Parameter* param) override;
 
-    /** Logs the laser trigger counts and request-to-reply times */
+    /** Clears the per-run noise veto counts */
+    bool startAcquisition() override;
+
+    /** Logs the noise veto counts and the laser trigger counts and request-to-reply times */
     bool stopAcquisition() override;
 
     /** Calibration progress of a stream: 0..1 while calibrating, 1 when done, -1 if the stream is unknown */
@@ -118,6 +128,16 @@ public:
     /** Baseline statistics of a stream (0 if unknown or still calibrating) */
     double getBaselineMean (uint16 streamId);
     double getBaselineStd (uint16 streamId);
+
+    /** True if the stream has a noise channel selected */
+    bool hasNoiseChannel (uint16 streamId);
+
+    /** Baseline statistics of the stream's noise channel (0 if none or still calibrating) */
+    double getNoiseBaselineMean (uint16 streamId);
+    double getNoiseBaselineStd (uint16 streamId);
+
+    /** Ripple onsets vetoed by the noise channel since acquisition started */
+    uint32_t getVetoedOnsets (uint16 streamId);
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);
@@ -148,11 +168,11 @@ private:
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);
 
-    /** Runs the method on the ripple channel and emits its events */
-    void processRipples (uint16 streamId, const float* rippleData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
+    /** Runs the method on the ripple channel, applies the noise veto and emits the events */
+    void processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
 
-    /** Z-scores the block's feature and hands it to the viewer queue */
-    void publishFeatures (uint16 streamId, int numSamples);
+    /** Z-scores the block's features and hands them, with the raw ripple channel, to the viewer queue */
+    void publishFeatures (uint16 streamId, const float* rippleData, int numSamples);
 
     /** Computes movement RMS windows for one block and updates pluginEnabled */
     void processMovement (uint16 streamId, AudioBuffer<float>& buffer, int numSamples, int64 firstSample);
