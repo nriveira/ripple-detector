@@ -12,6 +12,7 @@
 #include "DetectionMethods/NoiseVeto.h"
 #include "FeatureFifo.h"
 #include "LaserTrigger.h"
+#include "StimLatencyMeter.h"
 
 class RippleDetectorEditor;
 
@@ -44,6 +45,10 @@ public:
     std::unique_ptr<NoiseVeto> noiseVeto; // Same method and settings, run on the noise channel
     std::vector<float> noiseFeatureScratch; // Noise channel feature values for the block
     std::atomic<uint32_t> vetoedOnsets { 0 }; // Onsets suppressed by the noise channel this run
+
+    // --- Stimulation latency ---
+    int stimInputLine { -1 }; // Digital input line carrying the stimulus controller's trigger, -1 if none
+    StimLatencyMeter latency; // Pairs ripple onsets with that line's rising edges
     int rippleOutputChannel { 0 }; // Output TTL line for ripple events
     bool rippleTtlHigh { false }; // True while the ripple TTL line is high
 
@@ -138,6 +143,13 @@ public:
 
     /** Ripple onsets vetoed by the noise channel since acquisition started */
     uint32_t getVetoedOnsets (uint16 streamId);
+
+    /** Digital input line of the stimulus trigger (-1 if none), and the latency measured against it this run */
+    int getStimInputLine (uint16 streamId);
+    StimLatencyMeter::Stats getLatencyStats (uint16 streamId);
+
+    /** Pairs the stimulus controller's hardware trigger with the ripple onsets */
+    void handleTTLEvent (TTLEventPtr event) override;
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);

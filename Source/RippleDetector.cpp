@@ -4,6 +4,7 @@
 
 #define CALIBRATION_DURATION_SECONDS 20
 #define VIEWER_FIFO_SECONDS 4.0f
+#define LATENCY_TIMEOUT_SECONDS 0.5 // an onset's stimulus must arrive within this long
 
 RippleDetectorSettings::RippleDetectorSettings()
 {
@@ -47,6 +48,18 @@ same RMS window.",
         "Ripple Output",
         "TTL line on which output events will be triggered",
         16);
+
+    addTtlLineParameter (
+        Parameter::STREAM_SCOPE,
+        "stim_in",
+        "Stim. Input",
+        "Digital input line on which the acquisition board records the stimulus controller's trigger. Each ripple onset is \
+paired with the next rising edge on this line within 500 ms, and the difference is reported as the stimulation latency: \
+everything from the samples reaching the computer to the controller's trigger (detection, GUI buffering, network, \
+controller), excluding the headstage-to-board and stimulator latencies.",
+        16,
+        false,
+        true);
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
@@ -260,6 +273,7 @@ void RippleDetector::updateSettings()
 
         parameterValueChanged (stream->getParameter ("Ripple_Input"));
         parameterValueChanged (stream->getParameter ("Noise_Input"));
+        parameterValueChanged (stream->getParameter ("stim_in"));
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
         parameterValueChanged (stream->getParameter ("time_thresh"));
@@ -450,10 +464,38 @@ void RippleDetector::configureLaserTrigger (bool destinationChanged)
     }
 }
 
+int RippleDetector::getStimInputLine (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return -1;
+
+    return settings[streamId]->stimInputLine;
+}
+
+StimLatencyMeter::Stats RippleDetector::getLatencyStats (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return {};
+
+    return settings[streamId]->latency.getStats();
+}
+
+void RippleDetector::handleTTLEvent (TTLEventPtr event)
+{
+    RippleDetectorSettings* s = settings[event->getStreamId()];
+
+    if (s != nullptr && s->stimInputLine >= 0 && event->getLine() == s->stimInputLine && event->getState())
+        s->latency.hardwareEdge (event->getSampleNumber());
+}
+
 bool RippleDetector::startAcquisition()
 {
     for (auto stream : getDataStreams())
-        settings[stream->getStreamId()]->vetoedOnsets = 0;
+    {
+        RippleDetectorSettings* s = settings[stream->getStreamId()];
+        s->vetoedOnsets = 0;
+        s->latency.reset (stream->getSampleRate(), (int64) (stream->getSampleRate() * LATENCY_TIMEOUT_SECONDS));
+    }
 
     return true;
 }
@@ -465,6 +507,13 @@ bool RippleDetector::stopAcquisition()
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         if (s->noiseInputChannel >= 0)
             LOGC ("Noise veto (", stream->getName(), "): ", (int) s->vetoedOnsets.load(), " ripple onsets suppressed");
+
+        const auto lat = s->latency.getStats();
+        if (s->stimInputLine >= 0 && (lat.matched > 0 || lat.missed > 0))
+            LOGC ("Stimulation latency (", stream->getName(), ", line ", s->stimInputLine + 1, "): ", (int) lat.matched,
+                  " paired, mean ", lat.meanMs, " ms (min ", lat.minMs, ", max ", lat.maxMs, ") from the ripple TTL, ",
+                  lat.meanDecisionMs, " ms from the detection decision; ", (int) lat.missed, " onsets without a stimulus, ",
+                  (int) lat.unmatched, " triggers without an onset");
     }
 
     const auto st = laserTrigger.getStats();
@@ -507,6 +556,10 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         {
             s->rippleInputChannel = -1;
         }
+    }
+    else if (paramName.equalsIgnoreCase ("stim_in"))
+    {
+        s->stimInputLine = (int) param->getValue();
     }
     else if (paramName.equalsIgnoreCase ("Noise_Input"))
     {
@@ -672,6 +725,9 @@ void RippleDetector::parameterValueChanged (Parameter* param)
 // Data acquisition and manipulation loop
 void RippleDetector::process (AudioBuffer<float>& buffer)
 {
+    // Upstream TTLs, for the stimulation latency (handleTTLEvent)
+    checkForEvents();
+
     // The calibrate button applies to every stream
     const bool calibrateAll = shouldCalibrate.exchange (false);
 
@@ -754,6 +810,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         const float* rippleData = buffer.getReadPointer (s->rippleInputChannel, 0);
         const float* noiseData = s->noiseInputChannel >= 0 ? buffer.getReadPointer (s->noiseInputChannel, 0) : nullptr;
         processRipples (streamId, rippleData, noiseData, numSamplesInBlock, firstSampleInBlock, featureOut, eventOut);
+        s->latency.expire (firstSampleInBlock + numSamplesInBlock);
 
         // The threshold is only defined once calibration has finished
         if (thresholdOut != nullptr && ! s->isCalibrating)
@@ -848,6 +905,10 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, c
                     {
                         setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
                         newState = true;
+
+                        // The decision could only be made once the onset's window was complete
+                        const int decided = std::min (ev.sampleIndex + window, numSamples);
+                        s->latency.onsetEmitted (firstSample + ev.sampleIndex, firstSample + decided);
                     }
                 }
             }

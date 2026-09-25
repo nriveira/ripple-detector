@@ -248,6 +248,19 @@ void RippleDetectorCanvas::updateCalibrationInfo()
                 text += "\nNoise RMS: mean " + String (noiseMean, 2) + ", SD " + String (noiseSd, 2)
                         + "\nVetoed by noise: " + String ((int) processor->getVetoedOnsets (streamId));
             }
+
+            const int line = processor->getStimInputLine (streamId);
+            const auto lat = processor->getLatencyStats (streamId);
+            if (line >= 0 && lat.matched > 0)
+                text += "\nStim latency: " + String (lat.meanMs, 1) + " ms mean (" + String (lat.minMs, 1) + "-"
+                        + String (lat.maxMs, 1) + "), n = " + String ((int) lat.matched)
+                        + "\n  " + String (lat.meanDecisionMs, 1) + " ms after the decision; last " + String (lat.lastMs, 1)
+                        + "\n  no stimulus: " + String ((int) lat.missed) + ", no onset: " + String ((int) lat.unmatched);
+            else if (line >= 0 && (lat.missed > 0 || lat.unmatched > 0))
+                text += "\nStim latency: no pairs yet (no stimulus: " + String ((int) lat.missed)
+                        + ", no onset: " + String ((int) lat.unmatched) + ")";
+            else if (line >= 0)
+                text += "\nStim latency: waiting for input line " + String (line + 1);
         }
         else
         {
@@ -359,7 +372,7 @@ void RippleDetectorCanvas::resized()
     }
 
     calibrateButton->setBounds (panelX, y + 6, 100, 22);
-    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 90);
+    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 150);
 
     plotArea = Rectangle<int> (10, TOOLBAR_HEIGHT + 10, width - PANEL_WIDTH - 20, height - TOOLBAR_HEIGHT - 20);
 }

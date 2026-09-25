@@ -54,6 +54,12 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     noiseInput->setLayout (ParameterEditor::Layout::nameOnTop);
     noiseInput->setSize (80, 34);
 
+    // Hardware trigger of the stimulus controller, for the measured latency
+    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "stim_in", colNoise, 57);
+    ParameterEditor* stimIn = getParameterEditor ("stim_in");
+    stimIn->setLayout (ParameterEditor::Layout::nameOnTop);
+    stimIn->setSize (80, 34);
+
     /* Column 2: detection settings */
     int col2 = 186;
 

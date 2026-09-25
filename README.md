@@ -76,16 +76,29 @@ These numbers cover the network hop only. The full detection-to-stimulus delay a
 
 The request and the reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors LaserDriver `Pi/web_app.py`.
 
+### Measuring the stimulation latency
+
+Record the stimulus controller's trigger on one of the acquisition board's digital inputs and select that line as **Stim. Input** (default: line 1; it can be set to none). Each ripple onset is then paired with the next rising edge on that line within 500 ms, and the difference between the two sample numbers is the measured latency. Both are counted on the acquisition clock, so this covers everything from the samples reaching the computer to the controller's trigger (detection, GUI buffering, the network request and the controller) and excludes the headstage-to-board and stimulator latencies, which have to be measured offline.
+
+The latency is reported two ways:
+
+- from the ripple TTL event, which is stamped at the start of the RMS window that crossed threshold, so it matches an offline comparison of the two lines in the recording;
+- from the detection decision, the end of that window, which is the first sample at which the detector could have known. The difference between the two is the windowing.
+
+The viewer panel shows the mean, range and last value, and the log gives the run's summary when acquisition stops. Onsets with no trigger within 500 ms are counted as *no stimulus* (e.g. the laser was busy or the request failed), and triggers with no onset before them as *no onset* (e.g. the laser's TEST button).
+
+The pairing is in `Source/StimLatencyMeter.h` and is tested by `Tests/StimLatencyMeterTests.cpp`.
+
 ### Adding a method
 
 Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerHttpTests.cpp` checks the laser trigger request and the parsing of the Pi's replies. Both need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerHttpTests.cpp` checks the laser trigger request and the parsing of the Pi's replies, and `Tests/StimLatencyMeterTests.cpp` the latency pairing. All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests
 ```
 
 ## Building from source
