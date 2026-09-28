@@ -61,20 +61,23 @@ The channels are typed as electrode channels and use the resolution (bit-volts) 
 
 ### Closed-loop laser trigger
 
-With **Laser Trigger** on, every ripple onset fires the laser through the [LaserDriver](https://github.com/nriveira/LaserDriver) Pi's web API: `POST /api/trigger_gpio`, the same request as the web GUI's GPIO trigger button, which pulses Pi GPIO 24 into the laser controller's fast edge input. Nothing needs to be installed or enabled on the Pi beyond its standard `laserhat-web` service.
+With **Laser Trigger** on, every ripple onset fires the laser through the [LaserDriver](https://github.com/nriveira/LaserDriver) Pi, which pulses its GPIO 24 into the laser controller's fast edge input. **Laser Via** chooses how:
+
+- **UDP** (default): a 20-byte datagram to `laserhat-brokerd`'s trigger port (17017; the broker runs with `--udp 192.168.17.10:17017`). The datagram is sent directly from the processing thread, as one non-blocking `sendto` with no allocation, in the same block as the TTL event. The broker raises the line and then acknowledges, and the acknowledgement carries the Pi's own receive-to-edge time and whether the laser was mid-pulse (the laser controller ignores a trigger while a pulse is running). Nothing is resent: a late pulse is worse than a missing one.
+- **HTTP**: `POST /api/trigger_gpio` to the Pi's web GUI on port 8080, for a Pi without the UDP listener. The request blocks, so a sender thread makes it; it is timed to the first byte of the reply, which the Pi sends after firing.
 
 | Control | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `TEST` | Fires once, whether or not `Laser Trigger` is on, and shows the Pi's answer on the button: the time in ms from the request to the Pi's reply when it fired, `REJECTED` (the Pi answered but did not fire, e.g. its GPIO is unavailable), `NO LINK` (no answer from `Laser Host`:`Laser Port`) or `SET HOST` |
+| `TEST` | Fires once, whether or not `Laser Trigger` is on, and shows the answer on the button: the round trip in ms when it fired, `BUSY` (the laser was mid-pulse and ignores it), `NO MCU` (the Pi has not heard from the laser controller), `REJECTED` (the Pi answered but did not fire), `NO LINK` (no answer) or `SET HOST` |
 | `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so a trigger never waits on a lookup) |
-| `Laser Port` | Port of the Pi's web API (default 8080) |
+| `UDP` / `HTTP` + `Port` | Transport, and its port (UDP 17017, HTTP 8080) |
 
-The settings apply to every stream. An HTTP request blocks for a connection and a reply, so it is never made on the audio thread: the onset only counts a request and wakes a sender thread, which makes one request per onset and times it to the first byte of the Pi's reply. The Pi fires before it replies, so that time is an upper bound on the request-to-fire delay; at the end of each run the log reports how many triggers were requested, fired, rejected and failed, with its mean and maximum. The reply is read only up to its declared length: Flask's development server takes about 10 ms more to close the connection, which the laser never waits for.
+The settings apply to every stream. The viewer panel and the log at the end of each run report how many triggers were fired, fired while the laser was busy, rejected or left unanswered, with the round trip and, over UDP, the time from the Pi receiving the datagram to raising the line.
 
-These numbers cover the network hop only. The full detection-to-stimulus delay also includes the `Time Thresh.` criterion and the GUI's processing block; record the stimulator's output on an acquisition-board input to measure it end to end.
+The UDP datagrams are in `Source/LaserTriggerUdp.h`, a mirror of LaserDriver `Pi/brokerd/udp_trigger.h`, checked byte for byte against LaserDriver's `Pi/udp_trigger.py` by `Tests/LaserTriggerUdpTests.cpp`. The HTTP request and reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors `Pi/web_app.py`.
 
-The request and the reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors LaserDriver `Pi/web_app.py`.
+These numbers cover the network hop only; the next section measures the whole path from the recording.
 
 ### Measuring the stimulation latency
 
@@ -95,10 +98,10 @@ Detection algorithms live in `Source/DetectionMethods/` and have no dependency o
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerHttpTests.cpp` checks the laser trigger request and the parsing of the Pi's replies, and `Tests/StimLatencyMeterTests.cpp` the latency pairing. All need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, and `Tests/StimLatencyMeterTests.cpp` the latency pairing. All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests
 ```
 
 ## Building from source

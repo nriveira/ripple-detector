@@ -261,6 +261,20 @@ void RippleDetectorCanvas::updateCalibrationInfo()
                         + ", no onset: " + String ((int) lat.unmatched) + ")";
             else if (line >= 0)
                 text += "\nStim latency: waiting for input line " + String (line + 1);
+
+            // Laser trigger path (all streams)
+            const LaserTrigger& laser = processor->getLaserTrigger();
+            const auto ls = laser.getStats();
+            if (ls.requested > 0)
+            {
+                const bool udp = laser.getTransport() == LaserTrigger::Transport::Udp;
+                text += "\nLaser (" + String (udp ? "UDP" : "HTTP") + "): fired " + String ((int) ls.fired)
+                        + ", busy " + String ((int) ls.busy) + ", no answer " + String ((int) ls.failed)
+                        + "\n  " + String (udp ? "round trip " : "to Pi reply ") + String (ls.meanMs, 2) + " ms (max "
+                        + String (ls.maxMs, 2) + ")";
+                if (udp && ls.fired > 0)
+                    text += "\n  in Pi " + String (ls.meanPiUs, 0) + String::fromUTF8 (" \xc2\xb5s (max ") + String (ls.maxPiUs, 0) + ")";
+            }
         }
         else
         {
@@ -372,7 +386,7 @@ void RippleDetectorCanvas::resized()
     }
 
     calibrateButton->setBounds (panelX, y + 6, 100, 22);
-    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 150);
+    statsLabel->setBounds (panelX, y + 34, PANEL_WIDTH - 25, 200);
 
     plotArea = Rectangle<int> (10, TOOLBAR_HEIGHT + 10, width - PANEL_WIDTH - 20, height - TOOLBAR_HEIGHT - 20);
 }

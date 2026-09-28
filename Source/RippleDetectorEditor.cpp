@@ -87,20 +87,31 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     laserTestButton = std::make_unique<UtilityButton> ("TEST");
     laserTestButton->addListener (this);
     laserTestButton->setRadius (3.0f);
-    laserTestButton->setTooltip ("Fires the laser once through the Pi's web API, whether or not Laser Trigger is on, "
-                                 "and shows the answer: the time in ms from the request to the Pi's reply when it fired (the Pi "
-                                 "fires before replying, so this bounds the trigger delay), REJECTED (the Pi is up "
-                                 "but did not fire), NO LINK (no answer from Laser Host:Laser Port) or SET HOST.");
+    laserTestButton->setTooltip ("Fires the laser once, whether or not Laser Trigger is on, and shows the answer: the "
+                                 "round trip in ms when it fired (UDP; with HTTP, the time to the Pi's reply, which it sends "
+                                 "after firing), BUSY (the laser was mid-pulse and ignores the trigger), NO MCU (the Pi has "
+                                 "not heard from the laser controller), REJECTED (the Pi answered but did not fire), NO LINK "
+                                 "(no answer from Laser Host and Port) or SET HOST.");
     laserTestButton->setBounds (col3 + TEXT_WIDTH - 56, ROW_Y[2], 56, ROW_HEIGHT);
     addAndMakeVisible (laserTestButton.get());
 
-    for (int i = 0; i < 2; i++)
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "laser_host", col3, ROW_Y[3]);
+    ParameterEditor* laserHost = getParameterEditor ("laser_host");
+    laserHost->setLayout (ParameterEditor::Layout::nameOnLeft);
+    laserHost->setSize (TEXT_WIDTH, ROW_HEIGHT);
+
+    // Transport, then the port for it (updateMethodView shows one of the two)
+    addComboBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "laser_transport", col3, ROW_Y[4]);
+    ParameterEditor* laserVia = getParameterEditor ("laser_transport");
+    laserVia->setLayout (ParameterEditor::Layout::nameHidden);
+    laserVia->setSize (58, ROW_HEIGHT);
+
+    for (auto* name : { "laser_udp_port", "laser_port" })
     {
-        const String name = i == 0 ? "laser_host" : "laser_port";
-        addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, name, col3, ROW_Y[3 + i]);
+        addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, name, col3 + 62, ROW_Y[4]);
         ParameterEditor* ed = getParameterEditor (name);
         ed->setLayout (ParameterEditor::Layout::nameOnLeft);
-        ed->setSize (TEXT_WIDTH, ROW_HEIGHT);
+        ed->setSize (TEXT_WIDTH - 62, ROW_HEIGHT);
     }
 
     /* Column 4 and 5: EMG / ACC movement detection settings */
@@ -220,15 +231,24 @@ void RippleDetectorEditor::pollLaserTest()
 
     laserTestButton->setEnabledState (true);
 
-    switch (trigger.getTestReply())
+    switch (trigger.getTestOutcome())
     {
-        case LaserTriggerHttp::Reply::Fired:
-            showLaserTestLabel (String (trigger.getTestMs(), 0) + " ms", 30);
+        case LaserTrigger::Outcome::Fired:
+        {
+            const double ms = trigger.getTestMs();
+            showLaserTestLabel (String (ms, ms < 10.0 ? 1 : 0) + " ms", 30);
             break;
-        case LaserTriggerHttp::Reply::Rejected:
+        }
+        case LaserTrigger::Outcome::Busy:
+            showLaserTestLabel ("BUSY", 30);
+            break;
+        case LaserTrigger::Outcome::McuDown:
+            showLaserTestLabel ("NO MCU", 30);
+            break;
+        case LaserTrigger::Outcome::Rejected:
             showLaserTestLabel ("REJECTED", 30);
             break;
-        default:
+        case LaserTrigger::Outcome::NoLink:
             showLaserTestLabel ("NO LINK", 30);
             break;
     }
@@ -292,6 +312,13 @@ void RippleDetectorEditor::updateMethodView()
 
     if (auto* ed = getParameterEditor ("adapt_tau"))
         ed->setVisible (adaptive);
+
+    // Only the port of the chosen laser transport
+    const bool http = rippleDetector->getParameter ("laser_transport")->getValueAsString().equalsIgnoreCase ("HTTP");
+    if (auto* ed = getParameterEditor ("laser_udp_port"))
+        ed->setVisible (! http);
+    if (auto* ed = getParameterEditor ("laser_port"))
+        ed->setVisible (http);
 
     // Movement settings only matter while movement detection is on. Mov. Input
     // stays visible: channels must be chosen before ACC / EMG can be selected.

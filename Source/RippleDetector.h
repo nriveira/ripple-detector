@@ -159,8 +159,9 @@ public:
 
     std::atomic<bool> shouldCalibrate { true };
 
-    /** The laser trigger, for the editor's TEST button */
+    /** The laser trigger, for the editor's TEST button and the viewer's statistics */
     LaserTrigger& getLaserTrigger() { return laserTrigger; }
+    const LaserTrigger& getLaserTrigger() const { return laserTrigger; }
 
 private:
     StreamSettings<RippleDetectorSettings> settings;

@@ -138,14 +138,23 @@ Adaptive: after calibration, the baseline keeps tracking the signal outside of d
         99999,
         1);
 
-    /* Closed-loop laser trigger (LaserDriver Pi web API, POST /api/trigger_gpio) */
+    /* Closed-loop laser trigger (LaserDriver Pi: UDP trigger port, or the web API) */
     addBooleanParameter (
         Parameter::PROCESSOR_SCOPE,
         "laser_trigger",
         "Laser Trigger",
-        "Fires the laser on every ripple onset through the LaserDriver Pi's web API (POST /api/trigger_gpio), \
-requested from the same block as the TTL event.",
+        "Fires the laser on every ripple onset through the LaserDriver Pi, from the same block as the TTL event.",
         false);
+
+    addCategoricalParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "laser_transport",
+        "Laser Via",
+        "UDP: a datagram to laserhat-brokerd's trigger port, sent directly from the processing thread and acknowledged \
+with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's web GUI, for a Pi without the UDP listener.",
+        { "UDP", "HTTP" },
+        0,
+        true);
 
     addStringParameter (
         Parameter::PROCESSOR_SCOPE,
@@ -157,9 +166,19 @@ requested from the same block as the TTL event.",
 
     addIntParameter (
         Parameter::PROCESSOR_SCOPE,
+        "laser_udp_port",
+        "Port",
+        "UDP trigger port of laserhat-brokerd on the LaserDriver Pi (--udp)",
+        LaserTriggerUdp::DEFAULT_PORT,
+        1,
+        65535,
+        true);
+
+    addIntParameter (
+        Parameter::PROCESSOR_SCOPE,
         "laser_port",
-        "Laser Port",
-        "Port of the LaserDriver Pi's web API",
+        "Port",
+        "Port of the LaserDriver Pi's web GUI (HTTP transport)",
         LaserTriggerHttp::DEFAULT_PORT,
         1,
         65535,
@@ -446,12 +465,17 @@ void RippleDetector::applyParams (uint16 streamId)
 
 void RippleDetector::configureLaserTrigger (bool destinationChanged)
 {
-    // The destination is only rewritten from laser_host / laser_port, which are
-    // locked during acquisition, so fire() on the audio thread never sees it change.
-    // The on/off switch can flip at any time and only touches an atomic.
+    // The destination is only rewritten from the host, transport and port
+    // parameters, which are locked during acquisition, so fire() on the audio
+    // thread never sees it change. The on/off switch can flip at any time and
+    // only touches an atomic.
     if (destinationChanged)
+    {
+        const bool http = getParameter ("laser_transport")->getValueAsString().equalsIgnoreCase ("HTTP");
         laserTrigger.configure (getParameter ("laser_host")->getValueAsString(),
-                                (int) getParameter ("laser_port")->getValue());
+                                (int) getParameter (http ? "laser_port" : "laser_udp_port")->getValue(),
+                                http ? LaserTrigger::Transport::Http : LaserTrigger::Transport::Udp);
+    }
 
     const bool enabled = (bool) getParameter ("laser_trigger")->getValue();
     laserTrigger.setEnabled (enabled);
@@ -519,9 +543,15 @@ bool RippleDetector::stopAcquisition()
     const auto st = laserTrigger.getStats();
 
     if (st.requested > 0)
-        LOGC ("Laser Trigger: ", (int) st.requested, " requested, ", (int) st.fired, " fired, ",
-              (int) st.rejected, " rejected by the Pi, ", (int) st.failed, " failed; request to Pi reply mean ",
-              st.meanMs, " ms, max ", st.maxMs, " ms");
+    {
+        const bool udp = laserTrigger.getTransport() == LaserTrigger::Transport::Udp;
+        LOGC ("Laser Trigger (", udp ? "UDP" : "HTTP", "): ", (int) st.requested, " requested, ", (int) st.fired, " fired (",
+              (int) st.busy, " while the MCU was mid-pulse, so ignored), ", (int) st.rejected, " rejected by the Pi, ",
+              (int) st.failed, " unanswered; ", udp ? "round trip" : "request to Pi reply", " mean ", st.meanMs,
+              " ms, max ", st.maxMs, " ms");
+        if (udp && st.fired > 0)
+            LOGC ("Laser Trigger: Pi receive to GPIO edge mean ", st.meanPiUs, " us, max ", st.maxPiUs, " us");
+    }
 
     return true;
 }
@@ -536,6 +566,9 @@ void RippleDetector::parameterValueChanged (Parameter* param)
             configureLaserTrigger (false);
         else if (paramName.startsWithIgnoreCase ("laser_"))
             configureLaserTrigger (true);
+
+        if (paramName.equalsIgnoreCase ("laser_transport"))
+            refreshEditor(); // shows the port for the chosen transport
         return;
     }
 
