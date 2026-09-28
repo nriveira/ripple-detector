@@ -7,6 +7,7 @@ constexpr int REPLY_TIMEOUT_MS = 1000; // HTTP: the Pi's web GUI allows its brok
 constexpr int MAX_REPLY_BYTES = 2048;
 constexpr int UDP_TEST_TIMEOUT_MS = 250;
 constexpr int UDP_POLL_MS = 50; // how often the sender thread looks for TEST requests while reading acknowledgements
+constexpr int UDP_ERROR_BACKOFF_MS = 5; // pause after a socket that reports data but yields none, so the thread never spins
 
 double ticksToMs (int64 ticks)
 {
@@ -28,6 +29,13 @@ LaserTrigger::LaserTrigger() : Thread ("Laser Trigger"),
                                udpSeq_ ((uint32_t) Random::getSystemRandom().nextInt()),
                                testSeq_ ((uint32_t) Random::getSystemRandom().nextInt())
 {
+    // JUCE's DatagramSocket::read() refuses (returns -1) on a socket that was never
+    // bound, even though sendto() binds it implicitly. Without this the Pi fires and
+    // answers, but every acknowledgement stays unread: TEST reports NO LINK and the
+    // acknowledgement reader spins. Port 0 lets the OS pick a free port.
+    if (! udpSocket.bindToPort (0) || ! testSocket.bindToPort (0))
+        LOGE ("Laser trigger: could not bind the UDP sockets; acknowledgements from the Pi will not be read");
+
     startThread();
 }
 
@@ -136,6 +144,13 @@ void LaserTrigger::run()
 {
     while (! threadShouldExit())
     {
+        if (transport_ == Transport::Udp)
+            readUdpAck (UDP_POLL_MS);
+        else
+            wake.wait (100);
+
+        // Read the destination after the wait, so a TEST requested during it uses the
+        // current host and port rather than the ones from before configure()
         String host;
         int port;
         Transport transport;
@@ -145,11 +160,6 @@ void LaserTrigger::run()
             port = port_;
             transport = transport_;
         }
-
-        if (transport == Transport::Udp)
-            readUdpAck (UDP_POLL_MS);
-        else
-            wake.wait (100);
 
         while (testsCompleted_ != testsRequested_.load() && ! threadShouldExit())
         {
@@ -198,8 +208,15 @@ void LaserTrigger::readUdpAck (int timeoutMs)
     int senderPort = 0;
     const int n = udpSocket.read (buffer, (int) sizeof (buffer), false, senderIp, senderPort);
 
+    if (n <= 0)
+    {
+        // Ready but nothing read: a socket error (e.g. an ICMP "port unreachable" on Windows)
+        wait (UDP_ERROR_BACKOFF_MS);
+        return;
+    }
+
     LaserTriggerUdp::Reply r;
-    if (n <= 0 || ! LaserTriggerUdp::parseReply (buffer, n, r) || r.status == LaserTriggerUdp::PONG)
+    if (! LaserTriggerUdp::parseReply (buffer, n, r) || r.status == LaserTriggerUdp::PONG)
         return;
 
     const double ms = ticksToMs (Time::getHighResolutionTicks() - (int64) r.clientTs);
@@ -234,8 +251,14 @@ void LaserTrigger::runUdpTest (const String& host, int port)
         int senderPort = 0;
         const int n = testSocket.read (buffer, (int) sizeof (buffer), false, senderIp, senderPort);
 
+        if (n <= 0)
+        {
+            wait (UDP_ERROR_BACKOFF_MS); // socket error, see readUdpAck()
+            continue;
+        }
+
         LaserTriggerUdp::Reply r;
-        if (n <= 0 || ! LaserTriggerUdp::parseReply (buffer, n, r) || r.seq != seq)
+        if (! LaserTriggerUdp::parseReply (buffer, n, r) || r.seq != seq)
             continue; // an older test's late answer
 
         testMs_ = ticksToMs (Time::getHighResolutionTicks() - sent);
