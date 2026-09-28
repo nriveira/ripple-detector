@@ -91,7 +91,9 @@ private:
     void drawPlot (Graphics& g);
 
     /** Draws the ripple channel's raw trace into 'area' */
-    void drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins);
+    /** Draws one channel as recorded (feature RAW or NOISE_RAW), shaded by the flags in 'shadeFlags' */
+    void drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins,
+                  int feature, const String& title, Colour colour, uint8_t shadeFlags);
 
     /** Min / max of one feature and the OR of the flags over the bins behind pixel column px; false if none */
     static bool columnStats (const StreamDisplay* display, size_t numBins, int width, int px, int feature,

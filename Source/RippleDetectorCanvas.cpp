@@ -9,7 +9,8 @@ namespace
 const int RANGE_OPTIONS[] = { 5, 10, 20, 50, 100, 200 }; // SD
 const int WINDOW_OPTIONS[] = { 2, 5, 10, 30 }; // seconds
 const int RAW_RANGE_OPTIONS[] = { 50, 100, 200, 500, 1000, 2000, 5000 }; // +/- uV
-const float RAW_FRACTION = 0.3f; // share of the plot height given to the raw trace
+const float RAW_FRACTION = 0.3f; // share of the plot height given to the raw ripple trace
+const float RAW_FRACTION_WITH_NOISE = 0.22f; // share each raw trace gets when the noise channel is shown too
 const float Y_MIN = -3.0f; // SD; features are non-negative so they rarely go below this
 
 const Colour TRACE_COLOUR (0x50, 0xa8, 0xff);
@@ -432,7 +433,8 @@ bool RippleDetectorCanvas::columnStats (const StreamDisplay* display, size_t num
     return any;
 }
 
-void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins)
+void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const StreamDisplay* display, size_t numBins,
+                                    int feature, const String& title, Colour colour, uint8_t shadeFlags)
 {
     const int axisLeft = 44;
     Rectangle<int> plot = area.withTrimmedLeft (axisLeft);
@@ -456,13 +458,19 @@ void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const Stre
         {
             float mn, mx;
             uint8_t flags;
-            if (! columnStats (display, numBins, w, px, FeatureFifo::RAW, mn, mx, flags))
+            if (! columnStats (display, numBins, w, px, feature, mn, mx, flags))
                 continue;
 
             const int x = plot.getX() + px;
+            flags &= shadeFlags;
             if (flags & FeatureFifo::TTL_HIGH)
             {
                 g.setColour (EVENT_COLOUR.withAlpha (0.35f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+            if (flags & FeatureFifo::NOISE)
+            {
+                g.setColour (NOISE_COLOUR.withAlpha (0.25f));
                 g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
             }
             if (flags & FeatureFifo::VETOED)
@@ -473,7 +481,7 @@ void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const Stre
 
             const float yTop = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mx));
             const float yBottom = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mn));
-            g.setColour (RAW_COLOUR);
+            g.setColour (colour);
             g.drawVerticalLine (x, yTop, std::max (yBottom, yTop + 1.0f));
         }
     }
@@ -489,8 +497,8 @@ void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const Stre
         g.drawText (String (uv, 0), area.getX(), (int) yFor (uv) - 8, axisLeft - 6, 16, Justification::centredRight);
 
     g.setFont (FontOptions ("Inter", "Medium", 13.0f));
-    g.setColour (RAW_COLOUR);
-    g.drawText (String::fromUTF8 ("Ripple channel (\xc2\xb5V)"), plot.getX() + 8, plot.getY() + 4, 260, 18, Justification::centredLeft);
+    g.setColour (colour);
+    g.drawText (title, plot.getX() + 8, plot.getY() + 4, 320, 18, Justification::centredLeft);
 }
 
 void RippleDetectorCanvas::drawPlot (Graphics& g)
@@ -503,10 +511,21 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     const StreamDisplay* display = it != displays.end() ? &it->second : nullptr;
     const bool hasNoise = processor->hasNoiseChannel (streamId);
 
-    // Raw trace on top, RMS feature below
-    const int rawHeight = (int) ((float) plotArea.getHeight() * RAW_FRACTION);
-    drawRaw (g, plotArea.withHeight (rawHeight), display, numBins);
-    const Rectangle<int> area = plotArea.withTrimmedTop (rawHeight + 8);
+    // Raw ripple trace on top, the raw noise trace under it (same uV scale), RMS features below
+    const String uv = String::fromUTF8 ("\xc2\xb5V");
+    Rectangle<int> area = plotArea;
+
+    const int rawHeight = (int) ((float) plotArea.getHeight() * (hasNoise ? RAW_FRACTION_WITH_NOISE : RAW_FRACTION));
+    drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::RAW,
+             "Ripple channel (" + uv + ")", RAW_COLOUR, FeatureFifo::TTL_HIGH | FeatureFifo::VETOED);
+    area.removeFromTop (8);
+
+    if (hasNoise)
+    {
+        drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::NOISE_RAW,
+                 "Noise channel (" + uv + ")", NOISE_COLOUR, FeatureFifo::NOISE | FeatureFifo::VETOED);
+        area.removeFromTop (8);
+    }
 
     const int axisLeft = 44;
     const int axisBottom = 22;

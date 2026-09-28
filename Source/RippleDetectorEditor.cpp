@@ -49,8 +49,8 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     /* Noise channel: onsets that also cross threshold here are vetoed */
     int colNoise = 98;
 
-    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Noise_Input", colNoise, 22);
-    ParameterEditor* noiseInput = getParameterEditor ("Noise_Input");
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "noise_channel", colNoise, 22);
+    ParameterEditor* noiseInput = getParameterEditor ("noise_channel");
     noiseInput->setLayout (ParameterEditor::Layout::nameOnTop);
     noiseInput->setSize (80, 34);
 
@@ -114,8 +114,10 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
         ed->setSize (TEXT_WIDTH - 62, ROW_HEIGHT);
     }
 
-    /* Column 4 and 5: EMG / ACC movement detection settings */
-    int col4 = 500;
+    /* Columns 4 and 5: EMG / ACC movement detection, anchored to the right edge.
+       Mode, input and output sit in the rightmost column so the block stays flush
+       right when movement detection is off and only mode and input are shown. */
+    int col4 = 595;
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_detect", col4, 22);
     ParameterEditor* movDetect = getParameterEditor ("mov_detect");
@@ -132,7 +134,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movOut->setLayout (ParameterEditor::Layout::nameOnTop);
     movOut->setSize (90, 34);
 
-    int col5 = 595;
+    int col5 = 500;
 
     addTextBoxParameterEditor (Parameter::STREAM_SCOPE, "mov_std", col5, 22);
     ParameterEditor* movStd = getParameterEditor ("mov_std");
@@ -330,6 +332,10 @@ void RippleDetectorEditor::updateMethodView()
     for (auto* name : { "Mov_Out", "mov_std", "min_time_st", "min_time_mov" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (movement);
+
+    // The noise drop-down's entries are the stream's channel names, set in the processor's updateSettings()
+    if (auto* ed = getParameterEditor ("noise_channel"))
+        ed->updateView();
 
     // Feature output toggle reflects the selected stream
     bool featureOut = false;

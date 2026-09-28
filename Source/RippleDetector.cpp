@@ -5,6 +5,7 @@
 #define CALIBRATION_DURATION_SECONDS 20
 #define VIEWER_FIFO_SECONDS 4.0f
 #define LATENCY_TIMEOUT_SECONDS 0.5 // an onset's stimulus must arrive within this long
+#define MAX_NOISE_CHOICES 1024 // channels a saved noise-channel choice can refer to (see registerParameters)
 
 RippleDetectorSettings::RippleDetectorSettings()
 {
@@ -33,14 +34,25 @@ void RippleDetector::registerParameters()
         "Continuous input channel on which ripples will be detected.",
         1);
 
-    addSelectedChannelsParameter (
-        Parameter::STREAM_SCOPE,
-        "Noise_Input",
-        "Noise Input",
-        "Optional channel that should not carry ripples. It is judged with the same detection settings against its own \
-baseline, and a ripple onset is suppressed (no TTL, no laser trigger) when the noise channel is above its threshold in the \
-same RMS window.",
-        1);
+    // Optional noise channel as a drop-down whose first entry is "None". A channel selector
+    // would pre-select the stream's first channel, turning the veto on by default. The
+    // placeholder list is replaced by the stream's channel names in updateSettings(); it
+    // only needs to be long enough for a saved choice to survive loading a configuration.
+    {
+        Array<String> choices { "None" };
+        for (int i = 1; i <= MAX_NOISE_CHOICES; i++)
+            choices.add (String (i));
+
+        addCategoricalParameter (
+            Parameter::STREAM_SCOPE,
+            "noise_channel",
+            "Noise Input",
+            "Optional channel that should not carry ripples. None (default): detection uses the ripple channel alone. \
+Otherwise the noise channel is judged with the same detection settings against its own baseline, and a ripple onset is \
+suppressed (no TTL, no laser trigger) when the noise channel is above its threshold in the same RMS window.",
+            choices,
+            0);
+    }
 
     addTtlLineParameter (
         Parameter::STREAM_SCOPE,
@@ -291,7 +303,14 @@ void RippleDetector::updateSettings()
             addFeatureChannels (getDataStream (streamId));
 
         parameterValueChanged (stream->getParameter ("Ripple_Input"));
-        parameterValueChanged (stream->getParameter ("Noise_Input"));
+        // Show the stream's own channel names in the noise drop-down
+        {
+            Array<String> choices { "None" };
+            for (auto* channel : stream->getContinuousChannels())
+                choices.add (channel->getName());
+            ((CategoricalParameter*) stream->getParameter ("noise_channel"))->setCategories (choices);
+        }
+        parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
@@ -594,16 +613,15 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     {
         s->stimInputLine = (int) param->getValue();
     }
-    else if (paramName.equalsIgnoreCase ("Noise_Input"))
+    else if (paramName.equalsIgnoreCase ("noise_channel"))
     {
-        Array<var>* array = param->getValue().getArray();
+        // Entry 0 is "None"; entry i is the stream's channel i - 1
+        const int choice = ((CategoricalParameter*) param)->getSelectedIndex();
+        const auto channels = getDataStream (streamId)->getContinuousChannels();
         int channel = -1;
 
-        if (array->size() > 0)
-        {
-            int localIndex = int (array->getFirst());
-            channel = getDataStream (streamId)->getContinuousChannels()[localIndex]->getGlobalIndex();
-        }
+        if (choice > 0 && choice <= channels.size())
+            channel = channels[choice - 1]->getGlobalIndex();
 
         if (channel >= 0 && channel == s->rippleInputChannel)
         {
@@ -849,7 +867,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         if (thresholdOut != nullptr && ! s->isCalibrating)
             FloatVectorOperations::fill (thresholdOut, (float) s->method->getOnsetThreshold(), numSamplesInBlock);
 
-        publishFeatures (streamId, rippleData, numSamplesInBlock);
+        publishFeatures (streamId, rippleData, noiseData, numSamplesInBlock);
 
         if (s->isCalibrating)
         {
@@ -968,7 +986,7 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, c
         std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
 }
 
-void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, int numSamples)
+void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples)
 {
     RippleDetectorSettings* s = settings[streamId];
 
@@ -996,6 +1014,8 @@ void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, 
     src[FeatureFifo::SIGNAL_Z] = s->zScratch.data();
     src[FeatureFifo::NOISE_Z] = s->noiseFeatureScratch.data();
     src[FeatureFifo::RAW] = rippleData;
+    // Without a noise channel the scratch buffer is all zeros, which stands in for its raw trace
+    src[FeatureFifo::NOISE_RAW] = noiseData != nullptr ? noiseData : s->noiseFeatureScratch.data();
     s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
 }
 

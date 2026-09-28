@@ -20,6 +20,7 @@ public:
         SIGNAL_Z = 0, // ripple channel feature, in its baseline SDs
         NOISE_Z, // noise channel feature, in its own baseline SDs (0 without a noise channel)
         RAW, // ripple channel as recorded
+        NOISE_RAW, // noise channel as recorded (0 without a noise channel)
         NUM_FEATURES
     };
 

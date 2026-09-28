@@ -185,7 +185,7 @@ private:
     void processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
 
     /** Z-scores the block's features and hands them, with the raw ripple channel, to the viewer queue */
-    void publishFeatures (uint16 streamId, const float* rippleData, int numSamples);
+    void publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples);
 
     /** Computes movement RMS windows for one block and updates pluginEnabled */
     void processMovement (uint16 streamId, AudioBuffer<float>& buffer, int numSamples, int64 firstSample);
