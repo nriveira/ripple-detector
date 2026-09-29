@@ -21,6 +21,22 @@ The gaps are randomised so the pulses fall at every phase of the GUI's processin
 
 During acquisition, the viewer's side panel shows the pulses detected and the stimulation latency: mean, range, last value, and pulses with no stimulus. The same figures are written to the log when acquisition stops. The latency runs from the pulse's first sample above threshold to the next rising edge on Stim. Input, both on the recording's own sample clock.
 
+## Without saline: File Reader playback
+
+The same pulses are also available as an Open Ephys recording in [`Resources/Test Recording`](../Test%20Recording), for trying pulse test mode on any computer without a bath or headstage. It is one electrode channel, CH1, at 30 kHz: the WAV's pulses at 1000 µV peak, with 10 µV of noise and 20 µV of 60 Hz hum.
+
+1. Add a **File Reader** and select `Resources/Test Recording/structure.oebin`.
+2. Add the **Ripple Detector** after it, set **Detect** to **Pulse (test)** and **Pulse Thresh.** to about 300 µV.
+3. Start acquisition. Each pulse gives one Ripple Output TTL, one sample after the pulse's edge, 10 ms long.
+
+A file has no stimulus trigger, so the latency meter counts every pulse as *no stimulus*. If **Laser Trigger** is on, the laser fires on every pulse from the file, which is a way to exercise the laser path without saline.
+
+`Tools/wav_to_openephys.py` makes the recording from the WAV, and can make it more like a real saline test:
+
+```bash
+python3 Tools/wav_to_openephys.py --highpass-hz 20 --invert --noise-uv 15
+```
+
 ## Regenerating
 
 `Tools/make_test_pulses.py` writes both files and needs only Python's standard library. For example, shorter and quieter pulses over two minutes:
@@ -29,4 +45,4 @@ During acquisition, the viewer's side panel shows the pulses detected and the st
 python3 Tools/make_test_pulses.py --width-ms 5 --amplitude 0.25 --duration 120
 ```
 
-Run it with `--help` for all options. Keep the shortest gap longer than the lockout, and the lockout longer than the pulse width.
+Run it with `--help` for all options. Keep the shortest gap longer than the lockout, and the lockout longer than the pulse width. Afterwards, run `Tools/wav_to_openephys.py` to update the File Reader recording to match.

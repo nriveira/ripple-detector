@@ -105,6 +105,8 @@ To measure the closed loop with a known input, set **Detect** to **Pulse (test)*
 
 The test audio, its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps.
 
+The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back, so pulse test mode can be tried without saline. `Tools/wav_to_openephys.py` converts any WAV the same way.
+
 ### Adding a method
 
 Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.

@@ -1,0 +1,28 @@
+{
+   "GUI version": "1.0.0",
+   "continuous": [
+      {
+         "folder_name": "PulseTest-100.0/",
+         "sample_rate": 30000.0,
+         "source_processor_name": "Pulse Test",
+         "source_processor_id": 100,
+         "stream_name": "PulseTest",
+         "recorded_processor": "Pulse Test",
+         "recorded_processor_id": 100,
+         "num_channels": 1,
+         "channels": [
+            {
+               "channel_name": "CH1",
+               "description": "pulse_test.wav converted by Tools/wav_to_openephys.py",
+               "identifier": "genericdata.continuous",
+               "history": "Pulse Test",
+               "bit_volts": 0.195,
+               "units": "uV",
+               "type": 0
+            }
+         ]
+      }
+   ],
+   "events": [],
+   "spikes": []
+}
