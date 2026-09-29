@@ -21,6 +21,8 @@ const Colour ONSET_COLOUR (0xff, 0x50, 0x50);
 const Colour EVENT_COLOUR (0x40, 0xd0, 0x70);
 const Colour BLOCKED_COLOUR (0xff, 0x90, 0x20);
 const Colour CALIBRATING_COLOUR (0x90, 0x90, 0x90);
+const Colour LOCKOUT_COLOUR (0x60, 0x90, 0xd0); // pulse test mode: detection locked out
+const Colour PULSE_MODE_COLOUR (0xff, 0xc0, 0x30); // pulse test mode banner
 
 /** Rounds a step to 1, 2 or 5 times a power of ten */
 float niceStep (float rawStep)
@@ -144,6 +146,9 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     panelTitle->setFont (FontOptions ("Inter", "Medium", 15.0f));
     addAndMakeVisible (panelTitle.get());
 
+    addParameterRow ("detect_mode", true);
+    addParameterRow ("pulse_thresh", false);
+    addParameterRow ("pulse_lockout", false);
     addParameterRow ("ripple_std", false);
     addParameterRow ("time_thresh", false);
     addParameterRow ("refr_time", false);
@@ -223,10 +228,57 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     calibrateButton->setLabel (RippleDetectorEditor::calibrateButtonText (processor, streamId, acquiring));
     calibrateButton->setEnabledState (! calibrating);
 
+    const bool pulse = processor->isPulseMode (streamId);
+    if (pulse)
+    {
+        calibrateButton->setLabel ("CALIBRATE");
+        calibrateButton->setEnabledState (false); // nothing to calibrate in pulse test mode
+    }
+
+    // Stimulation latency and laser lines, shown in both modes
+    auto latencyAndLaserText = [this, streamId]()
+    {
+        String t;
+        const int line = processor->getStimInputLine (streamId);
+        const auto lat = processor->getLatencyStats (streamId);
+        if (line >= 0 && lat.matched > 0)
+            t += "\nStim latency: " + String (lat.meanMs, 1) + " ms mean (" + String (lat.minMs, 1) + "-"
+                 + String (lat.maxMs, 1) + "), n = " + String ((int) lat.matched)
+                 + "\n  " + String (lat.meanDecisionMs, 1) + " ms after the decision; last " + String (lat.lastMs, 1)
+                 + "\n  no stimulus: " + String ((int) lat.missed) + ", no onset: " + String ((int) lat.unmatched);
+        else if (line >= 0 && (lat.missed > 0 || lat.unmatched > 0))
+            t += "\nStim latency: no pairs yet (no stimulus: " + String ((int) lat.missed)
+                 + ", no onset: " + String ((int) lat.unmatched) + ")";
+        else if (line >= 0)
+            t += "\nStim latency: waiting for input line " + String (line + 1);
+
+        const LaserTrigger& laser = processor->getLaserTrigger();
+        const auto ls = laser.getStats();
+        if (ls.requested > 0)
+        {
+            const bool udp = laser.getTransport() == LaserTrigger::Transport::Udp;
+            t += "\nLaser (" + String (udp ? "UDP" : "HTTP") + "): fired " + String ((int) ls.fired)
+                 + ", busy " + String ((int) ls.busy) + ", no answer " + String ((int) ls.failed)
+                 + "\n  " + String (udp ? "round trip " : "to Pi reply ") + String (ls.meanMs, 2) + " ms (max "
+                 + String (ls.maxMs, 2) + ")";
+            if (udp && ls.fired > 0)
+                t += "\n  in Pi " + String (ls.meanPiUs, 0) + String::fromUTF8 (" \xc2\xb5s (max ") + String (ls.maxPiUs, 0) + ")";
+        }
+        return t;
+    };
+
     String text;
     if (streamId == 0)
     {
         text = "";
+    }
+    else if (pulse)
+    {
+        const PulseEdgeDetector::Params* pp = processor->getPulseParams (streamId);
+        text = "Pulse test mode: edges " + String (pp != nullptr ? pp->thresholdUv : 0.0, 0) + String::fromUTF8 (" \xc2\xb5V")
+               + " from baseline,\nlockout " + String (pp != nullptr ? pp->lockoutMs : 0.0, 0) + " ms. Pulses detected: "
+               + String ((int) processor->getPulseDetections (streamId));
+        text += latencyAndLaserText();
     }
     else if (calibrating)
     {
@@ -250,32 +302,7 @@ void RippleDetectorCanvas::updateCalibrationInfo()
                         + "\nVetoed by noise: " + String ((int) processor->getVetoedOnsets (streamId));
             }
 
-            const int line = processor->getStimInputLine (streamId);
-            const auto lat = processor->getLatencyStats (streamId);
-            if (line >= 0 && lat.matched > 0)
-                text += "\nStim latency: " + String (lat.meanMs, 1) + " ms mean (" + String (lat.minMs, 1) + "-"
-                        + String (lat.maxMs, 1) + "), n = " + String ((int) lat.matched)
-                        + "\n  " + String (lat.meanDecisionMs, 1) + " ms after the decision; last " + String (lat.lastMs, 1)
-                        + "\n  no stimulus: " + String ((int) lat.missed) + ", no onset: " + String ((int) lat.unmatched);
-            else if (line >= 0 && (lat.missed > 0 || lat.unmatched > 0))
-                text += "\nStim latency: no pairs yet (no stimulus: " + String ((int) lat.missed)
-                        + ", no onset: " + String ((int) lat.unmatched) + ")";
-            else if (line >= 0)
-                text += "\nStim latency: waiting for input line " + String (line + 1);
-
-            // Laser trigger path (all streams)
-            const LaserTrigger& laser = processor->getLaserTrigger();
-            const auto ls = laser.getStats();
-            if (ls.requested > 0)
-            {
-                const bool udp = laser.getTransport() == LaserTrigger::Transport::Udp;
-                text += "\nLaser (" + String (udp ? "UDP" : "HTTP") + "): fired " + String ((int) ls.fired)
-                        + ", busy " + String ((int) ls.busy) + ", no answer " + String ((int) ls.failed)
-                        + "\n  " + String (udp ? "round trip " : "to Pi reply ") + String (ls.meanMs, 2) + " ms (max "
-                        + String (ls.maxMs, 2) + ")";
-                if (udp && ls.fired > 0)
-                    text += "\n  in Pi " + String (ls.meanPiUs, 0) + String::fromUTF8 (" \xc2\xb5s (max ") + String (ls.maxPiUs, 0) + ")";
-            }
+            text += latencyAndLaserText();
         }
         else
         {
@@ -288,13 +315,24 @@ void RippleDetectorCanvas::updateCalibrationInfo()
 
 void RippleDetectorCanvas::updateParameterVisibility()
 {
+    // Pulse test mode shows its own settings in place of the ripple settings
+    const bool pulse = processor->isPulseMode (currentStreamId());
+
+    for (auto* name : { "ripple_std", "time_thresh", "refr_time", "rms_samples", "baseline" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (! pulse);
+
+    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (pulse);
+
     bool adaptive = false;
     if (auto* stream = processor->getDataStream (currentStreamId()))
         if (auto* p = stream->getParameter ("baseline"))
             adaptive = p->getValueAsString().equalsIgnoreCase ("Adaptive");
 
     if (auto* ed = getParameterEditor ("adapt_tau"))
-        ed->setVisible (adaptive);
+        ed->setVisible (adaptive && ! pulse);
 
     resized();
 }
@@ -509,7 +547,8 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     const uint16 streamId = currentStreamId();
     auto it = displays.find (streamId);
     const StreamDisplay* display = it != displays.end() ? &it->second : nullptr;
-    const bool hasNoise = processor->hasNoiseChannel (streamId);
+    const bool pulseMode = processor->isPulseMode (streamId);
+    const bool hasNoise = ! pulseMode && processor->hasNoiseChannel (streamId); // bypassed in pulse test mode
 
     // Raw ripple trace on top, the raw noise trace under it (same uV scale), RMS features below
     const String uv = String::fromUTF8 ("\xc2\xb5V");
@@ -517,7 +556,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
 
     const int rawHeight = (int) ((float) plotArea.getHeight() * (hasNoise ? RAW_FRACTION_WITH_NOISE : RAW_FRACTION));
     drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::RAW,
-             "Ripple channel (" + uv + ")", RAW_COLOUR, FeatureFifo::TTL_HIGH | FeatureFifo::VETOED);
+             (pulseMode ? "Test pulse channel (" : "Ripple channel (") + uv + ")", RAW_COLOUR, FeatureFifo::TTL_HIGH | FeatureFifo::VETOED);
     area.removeFromTop (8);
 
     if (hasNoise)
@@ -565,6 +604,11 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
             if (flags & FeatureFifo::CALIBRATING)
             {
                 g.setColour (CALIBRATING_COLOUR.withAlpha (0.18f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+            if (flags & FeatureFifo::LOCKOUT)
+            {
+                g.setColour (LOCKOUT_COLOUR.withAlpha (0.14f));
                 g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
             }
             if (flags & FeatureFifo::BLOCKED)
@@ -618,8 +662,18 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         }
     }
 
-    // Threshold line (mean + x SD, i.e. x in these units; the same for the noise trace)
-    if (const DetectionParams* params = processor->getStreamParams (streamId))
+    // Threshold line. Pulse test mode plots the level in multiples of its threshold, so the line sits at 1
+    if (pulseMode)
+    {
+        const PulseEdgeDetector::Params* pp = processor->getPulseParams (streamId);
+        g.setColour (ONSET_COLOUR);
+        g.drawHorizontalLine ((int) yFor (1.0f), (float) plot.getX(), (float) plot.getRight());
+        g.setFont (FontOptions ("Inter", "Regular", 12.0f));
+        g.drawText ("threshold: " + String (pp != nullptr ? pp->thresholdUv : 0.0, 0) + String::fromUTF8 (" \xc2\xb5V"),
+                    plot.getRight() - 150, (int) yFor (1.0f) - 16, 146, 14, Justification::centredRight);
+    }
+    // Ripple mode: mean + x SD, i.e. x in these units; the same for the noise trace
+    else if (const DetectionParams* params = processor->getStreamParams (streamId))
     {
         const float onset = (float) params->onsetSds;
 
@@ -660,7 +714,18 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     // Legend and status
     g.setFont (FontOptions ("Inter", "Medium", 13.0f));
     g.setColour (TRACE_COLOUR);
-    g.drawText ("RMS (baseline SD)", plot.getX() + 8, plot.getY() + 4, 150, 18, Justification::centredLeft);
+    if (pulseMode)
+    {
+        g.drawText ("|signal - baseline| (x threshold)", plot.getX() + 8, plot.getY() + 4, 230, 18, Justification::centredLeft);
+        g.setColour (LOCKOUT_COLOUR);
+        g.drawText ("lockout", plot.getX() + 240, plot.getY() + 4, 60, 18, Justification::centredLeft);
+        g.setColour (EVENT_COLOUR);
+        g.drawText ("TTL", plot.getX() + 300, plot.getY() + 4, 40, 18, Justification::centredLeft);
+    }
+    else
+    {
+        g.drawText ("RMS (baseline SD)", plot.getX() + 8, plot.getY() + 4, 150, 18, Justification::centredLeft);
+    }
 
     if (hasNoise)
     {
@@ -670,7 +735,12 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         g.drawText ("vetoed", plot.getX() + 350, plot.getY() + 4, 60, 18, Justification::centredLeft);
     }
 
-    if (calibrating)
+    if (pulseMode)
+    {
+        g.setColour (PULSE_MODE_COLOUR);
+        g.drawText ("PULSE TEST MODE", plot, Justification::centredTop);
+    }
+    else if (calibrating)
     {
         g.setColour (CALIBRATING_COLOUR);
         g.drawText ("CALIBRATING", plot, Justification::centredTop);

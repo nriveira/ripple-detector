@@ -4,7 +4,7 @@ project(ripple-detector-tests CXX)
 # Standalone tests for the detection methods, the laser trigger request and the latency
 # measurement. These do not need the Open Ephys GUI:
 #
-#   cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests
+#   cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,3 +32,7 @@ add_test(NAME latency_meter_tests COMMAND latency_meter_tests)
 add_executable(laser_trigger_udp_tests LaserTriggerUdpTests.cpp)
 target_include_directories(laser_trigger_udp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../Source)
 add_test(NAME laser_trigger_udp_tests COMMAND laser_trigger_udp_tests)
+
+add_executable(pulse_edge_tests PulseEdgeDetectorTests.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../Source/DetectionMethods/PulseEdgeDetector.cpp)
+target_include_directories(pulse_edge_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../Source)
+add_test(NAME pulse_edge_tests COMMAND pulse_edge_tests)

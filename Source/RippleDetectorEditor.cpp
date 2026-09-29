@@ -68,6 +68,15 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     addRow ("refr_time", col2, ROW_Y[2]);
     addRow ("rms_samples", col2, ROW_Y[3]);
 
+    // Pulse test mode: its settings take the place of the ripple settings (updateMethodView)
+    addRow ("pulse_thresh", col2, ROW_Y[0]);
+    addRow ("pulse_lockout", col2, ROW_Y[1]);
+
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "detect_mode", col2, ROW_Y[4]);
+    ParameterEditor* detectMode = getParameterEditor ("detect_mode");
+    detectMode->setLayout (ParameterEditor::Layout::nameOnLeft);
+    detectMode->setSize (TEXT_WIDTH, ROW_HEIGHT);
+
     /* Column 3: baseline mode */
     int col3 = 343;
 
@@ -284,9 +293,11 @@ void RippleDetectorEditor::timerCallback()
 {
     const uint16 streamId = getCurrentStream();
     const bool calibrating = acquisitionIsActive && rippleDetector->isCalibrating (streamId);
+    const bool pulse = rippleDetector->isPulseMode (streamId);
 
-    calibrateButton->setLabel (calibrateButtonText (rippleDetector, streamId, acquisitionIsActive));
-    calibrateButton->setEnabledState (! calibrating);
+    // Pulse test mode has no baseline to calibrate
+    calibrateButton->setLabel (pulse ? String ("CALIBRATE") : calibrateButtonText (rippleDetector, streamId, acquisitionIsActive));
+    calibrateButton->setEnabledState (! calibrating && ! pulse);
 }
 
 // Called when settings are updated
@@ -306,6 +317,17 @@ void RippleDetectorEditor::selectedStreamHasChanged()
 
 void RippleDetectorEditor::updateMethodView()
 {
+    // Pulse test mode replaces the ripple settings with its own; the noise channel is bypassed
+    const bool pulse = rippleDetector->isPulseMode (getCurrentStream());
+
+    for (auto* name : { "ripple_std", "time_thresh", "refr_time", "rms_samples", "baseline", "noise_channel" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (! pulse);
+
+    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (pulse);
+
     // Adaptive baseline time constant
     bool adaptive = false;
     if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
@@ -313,7 +335,7 @@ void RippleDetectorEditor::updateMethodView()
             adaptive = p->getValueAsString().equalsIgnoreCase ("Adaptive");
 
     if (auto* ed = getParameterEditor ("adapt_tau"))
-        ed->setVisible (adaptive);
+        ed->setVisible (adaptive && ! pulse);
 
     // Only the port of the chosen laser transport
     const bool http = rippleDetector->getParameter ("laser_transport")->getValueAsString().equalsIgnoreCase ("HTTP");
@@ -351,4 +373,8 @@ void RippleDetectorEditor::updateMethodView()
     featureToggle->setEnabled (hasStream && ! acquisitionIsActive);
 
     timerCallback();
+
+    // The viewer's settings panel follows the detection mode too
+    if (canvas != nullptr)
+        canvas->update();
 }

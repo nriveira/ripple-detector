@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DetectionMethods/DetectionMethod.h"
+#include "DetectionMethods/PulseEdgeDetector.h"
 #include "DetectionMethods/NoiseVeto.h"
 #include "FeatureFifo.h"
 #include "LaserTrigger.h"
@@ -58,6 +59,17 @@ public:
     ContinuousChannel* featureChannel { nullptr }; // RIP_FEAT: the RMS feature
     ContinuousChannel* thresholdChannel { nullptr }; // RIP_THR: baseline mean + x SD
     ContinuousChannel* eventChannelOut { nullptr }; // RIP_EVENT: threshold-height pulse while a ripple is detected
+
+    // --- Pulse test mode (debug) ---
+    // Detects square test pulses on the ripple input instead of ripples, with the same
+    // outputs (TTL, laser, latency), to measure the closed loop with a known input.
+    std::atomic<bool> pulseModeRequested { false }; // "detect_mode" parameter (message thread)
+    bool pulseModeActive { false }; // audio thread
+    PulseEdgeDetector pulse;
+    PulseEdgeDetector::Params pulseParams; // written by parameterValueChanged, handed over with pulseParamsDirty
+    std::atomic<bool> pulseParamsDirty { false };
+    std::vector<PulseEdgeDetector::Event> pulseEvents;
+    std::atomic<uint32_t> pulseDetections { 0 }; // edges detected this run
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
@@ -151,6 +163,15 @@ public:
     /** Pairs the stimulus controller's hardware trigger with the ripple onsets */
     void handleTTLEvent (TTLEventPtr event) override;
 
+    /** True when the stream detects test pulses instead of ripples ("detect_mode") */
+    bool isPulseMode (uint16 streamId);
+
+    /** Pulse test mode: edges detected on the stream this run */
+    uint32_t getPulseDetections (uint16 streamId);
+
+    /** Pulse test mode: the stream's detector settings, or nullptr */
+    const PulseEdgeDetector::Params* getPulseParams (uint16 streamId);
+
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);
 
@@ -183,6 +204,10 @@ private:
 
     /** Runs the method on the ripple channel, applies the noise veto and emits the events */
     void processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
+
+    /** Pulse test mode: detects test-pulse edges and drives the same outputs as a ripple */
+    void processPulses (uint16 streamId, const float* data, int numSamples, int64 firstSample,
+                        float* featureOut, float* thresholdOut, float* eventOut);
 
     /** Z-scores the block's features and hands them, with the raw ripple channel, to the viewer queue */
     void publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples);

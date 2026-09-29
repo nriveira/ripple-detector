@@ -73,6 +73,43 @@ controller), excluding the headstage-to-board and stimulator latencies.",
         false,
         true);
 
+    /* Pulse test mode (debug) */
+    addCategoricalParameter (
+        Parameter::STREAM_SCOPE,
+        "detect_mode",
+        "Detect",
+        "Ripple: detect sharp-wave ripples (normal use). Pulse (test): detect the leading edge of square test pulses on the \
+Ripple Input channel instead, e.g. pulses played into saline, with the same response as a ripple (Ripple Output TTL, laser \
+trigger, stimulation latency). Noise veto and movement gating are bypassed in pulse mode; switching back to Ripple \
+recalibrates the stream.",
+        { "Ripple", "Pulse (test)" },
+        0);
+
+    addFloatParameter (
+        Parameter::STREAM_SCOPE,
+        "pulse_thresh",
+        "Pulse Thresh.",
+        "Pulse test mode: distance from the channel's running baseline, in the channel's units (uV for headstage channels), \
+that counts as a pulse edge. Either polarity. Must hold for 2 consecutive samples.",
+        "uV",
+        200,
+        0,
+        1000000,
+        10);
+
+    addFloatParameter (
+        Parameter::STREAM_SCOPE,
+        "pulse_lockout",
+        "Lockout",
+        "Pulse test mode: no new pulse is detected for this long after one, so the pulse's falling edge, the undershoot of an \
+AC-coupled source and the stimulation's own artefact are not detected as pulses. Keep it longer than the test pulses and \
+shorter than the gap between them.",
+        "ms",
+        1000,
+        0,
+        60000,
+        10);
+
     addFloatParameter (
         Parameter::STREAM_SCOPE,
         "ripple_std",
@@ -312,6 +349,16 @@ void RippleDetector::updateSettings()
         }
         parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
+
+        s->pulseParams = PulseEdgeDetector::Params();
+        s->pulseParams.sampleRate = stream->getSampleRate();
+        parameterValueChanged (stream->getParameter ("pulse_thresh"));
+        parameterValueChanged (stream->getParameter ("pulse_lockout"));
+        s->pulse.setParams (s->pulseParams);
+        s->pulse.reset();
+        s->pulseParamsDirty = false;
+        parameterValueChanged (stream->getParameter ("detect_mode"));
+        s->pulseModeActive = s->pulseModeRequested;
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
         parameterValueChanged (stream->getParameter ("time_thresh"));
@@ -446,6 +493,30 @@ uint32_t RippleDetector::getVetoedOnsets (uint16 streamId)
     return settings[streamId]->vetoedOnsets.load();
 }
 
+bool RippleDetector::isPulseMode (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return false;
+
+    return settings[streamId]->pulseModeRequested;
+}
+
+uint32_t RippleDetector::getPulseDetections (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return 0;
+
+    return settings[streamId]->pulseDetections;
+}
+
+const PulseEdgeDetector::Params* RippleDetector::getPulseParams (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return nullptr;
+
+    return &settings[streamId]->pulseParams;
+}
+
 FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
@@ -537,6 +608,7 @@ bool RippleDetector::startAcquisition()
     {
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         s->vetoedOnsets = 0;
+        s->pulseDetections = 0;
         s->latency.reset (stream->getSampleRate(), (int64) (stream->getSampleRate() * LATENCY_TIMEOUT_SECONDS));
     }
 
@@ -548,8 +620,15 @@ bool RippleDetector::stopAcquisition()
     for (auto stream : getDataStreams())
     {
         RippleDetectorSettings* s = settings[stream->getStreamId()];
-        if (s->noiseInputChannel >= 0)
+        // (LOGC expands with its own semicolon, so if / else need braces)
+        if (s->pulseModeActive)
+        {
+            LOGC ("Pulse test mode (", stream->getName(), "): ", (int) s->pulseDetections.load(), " pulses detected");
+        }
+        else if (s->noiseInputChannel >= 0)
+        {
             LOGC ("Noise veto (", stream->getName(), "): ", (int) s->vetoedOnsets.load(), " ripple onsets suppressed");
+        }
 
         const auto lat = s->latency.getStats();
         if (s->stimInputLine >= 0 && (lat.matched > 0 || lat.missed > 0))
@@ -608,6 +687,22 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         {
             s->rippleInputChannel = -1;
         }
+    }
+    else if (paramName.equalsIgnoreCase ("detect_mode"))
+    {
+        // Picked up by the audio thread at its next block (process())
+        s->pulseModeRequested = ((CategoricalParameter*) param)->getSelectedIndex() == 1;
+        refreshEditor();
+    }
+    else if (paramName.equalsIgnoreCase ("pulse_thresh"))
+    {
+        s->pulseParams.thresholdUv = (float) param->getValue();
+        s->pulseParamsDirty = true;
+    }
+    else if (paramName.equalsIgnoreCase ("pulse_lockout"))
+    {
+        s->pulseParams.lockoutMs = (float) param->getValue();
+        s->pulseParamsDirty = true;
     }
     else if (paramName.equalsIgnoreCase ("stim_in"))
     {
@@ -817,6 +912,55 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->noiseVeto->setParams (s->params);
         }
 
+        // Scratch buffers for this block
+        if ((int) s->featureScratch.size() < numSamplesInBlock)
+        {
+            s->featureScratch.resize ((size_t) numSamplesInBlock);
+            s->zScratch.resize ((size_t) numSamplesInBlock);
+            s->flagScratch.resize ((size_t) numSamplesInBlock);
+            s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
+        }
+
+        if (s->pulseParamsDirty.exchange (false))
+            s->pulse.setParams (s->pulseParams);
+
+        // Switching between ripple and pulse test mode
+        const bool wantPulse = s->pulseModeRequested.load();
+        if (wantPulse != s->pulseModeActive)
+        {
+            s->pulseModeActive = wantPulse;
+
+            if (s->rippleTtlHigh)
+                setRippleTtl (streamId, false, 0, firstSampleInBlock);
+
+            if (wantPulse)
+            {
+                s->pulse.reset();
+
+                // Movement gating is bypassed in pulse mode: release a block that is in force
+                if (! s->pluginEnabled)
+                {
+                    s->pluginEnabled = true;
+                    addEvent (s->createEvent (s->movementOutputChannel, firstSampleInBlock, false), 0);
+                }
+                LOGC ("Stream ", streamId, ": pulse test mode");
+            }
+            else
+            {
+                // The ripple baseline predates the test; estimate it again
+                s->calibrate = true;
+                LOGC ("Stream ", streamId, ": ripple detection");
+            }
+        }
+
+        if (s->pulseModeActive)
+        {
+            const float* pulseData = buffer.getReadPointer (s->rippleInputChannel, 0);
+            processPulses (streamId, pulseData, numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
+            s->latency.expire (firstSampleInBlock + numSamplesInBlock);
+            continue;
+        }
+
         // Enable detection again if movement detection was switched off or if calibration was requested
         if (! s->pluginEnabled && (! s->movSwitchEnabled || calibrateAll))
         {
@@ -843,15 +987,6 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
 
             if (s->rippleTtlHigh)
                 setRippleTtl (streamId, false, 0, firstSampleInBlock);
-        }
-
-        // Scratch buffers for this block
-        if ((int) s->featureScratch.size() < numSamplesInBlock)
-        {
-            s->featureScratch.resize ((size_t) numSamplesInBlock);
-            s->zScratch.resize ((size_t) numSamplesInBlock);
-            s->flagScratch.resize ((size_t) numSamplesInBlock);
-            s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
         }
 
         // Movement gating is evaluated first so that it applies to this block's ripple events
@@ -984,6 +1119,74 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, c
 
     if (featureOut != nullptr)
         std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
+}
+
+void RippleDetector::processPulses (uint16 streamId, const float* data, int numSamples, int64 firstSample,
+                                   float* featureOut, float* thresholdOut, float* eventOut)
+{
+    RippleDetectorSettings* s = settings[streamId];
+    const float threshold = (float) s->pulse.getParams().thresholdUv;
+
+    // flagScratch receives the detector's per-sample lockout state (1 or 0), turned into flags below
+    s->pulseEvents.clear();
+    s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data(), s->flagScratch.data());
+    for (int i = 0; i < numSamples; i++)
+        s->flagScratch[(size_t) i] = s->flagScratch[(size_t) i] != 0 ? FeatureFifo::LOCKOUT : 0;
+
+    // Drive the outputs from the events, and mark the TTL line per sample
+    bool high = s->rippleTtlHigh;
+    int cursor = 0;
+
+    auto markUntil = [&] (int to)
+    {
+        if (high && to > cursor)
+        {
+            for (int k = cursor; k < to; k++)
+                s->flagScratch[(size_t) k] |= FeatureFifo::TTL_HIGH;
+            if (eventOut != nullptr)
+                FloatVectorOperations::fill (eventOut + cursor, threshold, to - cursor);
+        }
+        cursor = std::max (cursor, to);
+    };
+
+    for (const auto& ev : s->pulseEvents)
+    {
+        markUntil (ev.sampleIndex);
+
+        if (ev.state)
+        {
+            setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+            s->pulseDetections++;
+
+            // Event time: the pulse's first sample above threshold; decision: the confirming sample
+            s->latency.onsetEmitted (firstSample + ev.sampleIndex - ev.edgeOffset, firstSample + ev.sampleIndex);
+            high = true;
+        }
+        else if (high)
+        {
+            setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+            high = false;
+        }
+    }
+    markUntil (numSamples);
+
+    if (featureOut != nullptr)
+        std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
+    if (thresholdOut != nullptr)
+        FloatVectorOperations::fill (thresholdOut, threshold, numSamples);
+
+    // Viewer: level in multiples of the threshold (the threshold line sits at 1), raw channel, no noise channel
+    const float scale = threshold > 0.0f ? 1.0f / threshold : 0.0f;
+    for (int i = 0; i < numSamples; i++)
+        s->zScratch[(size_t) i] = s->featureScratch[(size_t) i] * scale;
+    std::fill (s->noiseFeatureScratch.begin(), s->noiseFeatureScratch.begin() + numSamples, 0.0f);
+
+    std::array<const float*, FeatureFifo::NUM_FEATURES> src;
+    src[FeatureFifo::SIGNAL_Z] = s->zScratch.data();
+    src[FeatureFifo::NOISE_Z] = s->noiseFeatureScratch.data();
+    src[FeatureFifo::RAW] = data;
+    src[FeatureFifo::NOISE_RAW] = s->noiseFeatureScratch.data();
+    s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
 }
 
 void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples)

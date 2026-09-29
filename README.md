@@ -93,16 +93,28 @@ The viewer panel shows the mean, range and last value, and the log gives the run
 
 The pairing is in `Source/StimLatencyMeter.h` and is tested by `Tests/StimLatencyMeterTests.cpp`.
 
+### Pulse test mode
+
+To measure the closed loop with a known input, set **Detect** to **Pulse (test)** and play square test pulses into saline. The detector then looks for the leading edge of a pulse on the Ripple Input channel instead of ripples, and responds exactly as it would to a ripple: Ripple Output TTL (10 ms), laser trigger, and the stimulation latency above.
+
+- **Edge:** the channel is compared with a slowly tracking baseline (20 ms time constant). An edge is two consecutive samples more than **Pulse Thresh.** away from it, in either polarity. The event time is the first of those samples, so the latency runs from the pulse's actual edge.
+- **Lockout:** after an edge, nothing is detected for **Lockout** (default 1000 ms), and detection re-arms only once the signal has settled back to its baseline. This hides the pulse's falling edge, the undershoot of an AC-coupled sound card and the stimulation's own artefact, so each test pulse is paired with exactly one stimulus. Keep the lockout longer than the pulses and shorter than the gaps between them.
+- **Bypassed:** the noise veto and movement gating, which would otherwise suppress a pulse that appears on every electrode in the bath. There is no calibration in this mode.
+- **Viewer:** shows the pulse channel, the level in multiples of the threshold (the threshold line sits at 1), the lockout and the TTL, with a PULSE TEST MODE banner. The side panel counts the pulses and shows the latency.
+- **Switching back** to Ripple recalibrates the stream, since the baseline would otherwise include the test pulses.
+
+The test audio, its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps.
+
 ### Adding a method
 
 Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, and `Tests/StimLatencyMeterTests.cpp` the latency pairing. All need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, and `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (both polarities, AC coupling, stimulation artefacts, lockout, glitches and block sizes). All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests
 ```
 
 ## Building from source
