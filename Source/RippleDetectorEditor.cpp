@@ -375,7 +375,10 @@ void RippleDetectorEditor::updateMethodView()
 
     timerCallback();
 
-    // The viewer's settings panel follows the detection mode too
-    if (canvas != nullptr)
+    // The viewer's settings panel follows the detection mode too. Only while the editor's
+    // stream exists: GenericEditor::update() refreshes the editor's settings before it
+    // switches to the new streams, and Visualizer::update() assumes the stream is there.
+    // After the switch, selectedStreamHasChanged() and updateVisualizer() update the viewer.
+    if (canvas != nullptr && rippleDetector->getDataStream (getCurrentStream()) != nullptr)
         canvas->update();
 }

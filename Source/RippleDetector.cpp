@@ -318,6 +318,8 @@ with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's
 // Update settings
 void RippleDetector::updateSettings()
 {
+    const ScopedValueSetter<bool> updating (updatingSettings, true);
+
     settings.update (getDataStreams());
     configureLaserTrigger (true);
 
@@ -567,6 +569,11 @@ const DetectionParams* RippleDetector::getStreamParams (uint16 streamId)
 
 void RippleDetector::refreshEditor()
 {
+    // During updateSettings() the GUI refreshes the editor afterwards; doing it now would
+    // reach streams that are being replaced (and crashed the GUI when a File Reader switched files)
+    if (updatingSettings)
+        return;
+
     // Show only the parameters relevant for the selected method / baseline mode
     if (auto* ed = dynamic_cast<RippleDetectorEditor*> (getEditor()))
     {
@@ -718,16 +725,14 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     {
         Array<var>* array = param->getValue().getArray();
 
-        if (array->size() > 0)
-        {
-            int localIndex = int (array->getFirst());
-            int globalIndex = getDataStream (streamId)->getContinuousChannels()[localIndex]->getGlobalIndex();
-            s->rippleInputChannel = globalIndex;
-        }
+        // A saved selection can point past the end of a stream with fewer channels
+        const auto channels = getDataStream (streamId)->getContinuousChannels();
+        const int localIndex = array->size() > 0 ? int (array->getFirst()) : -1;
+
+        if (localIndex >= 0 && localIndex < channels.size())
+            s->rippleInputChannel = channels[localIndex]->getGlobalIndex();
         else
-        {
             s->rippleInputChannel = -1;
-        }
     }
     else if (paramName.equalsIgnoreCase ("detect_mode"))
     {
@@ -884,11 +889,13 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         s->movementChannels.clear();
         Array<var>* array = param->getValue().getArray();
 
+        const auto channels = getDataStream (streamId)->getContinuousChannels();
         for (int i = 0; i < array->size(); i++)
         {
-            int localIndex = int (array->getReference (i));
-            int globalIndex = getDataStream (streamId)->getContinuousChannels()[localIndex]->getGlobalIndex();
-            s->movementChannels.push_back (globalIndex);
+            // Skip a saved selection past the end of a stream with fewer channels
+            const int localIndex = int (array->getReference (i));
+            if (localIndex >= 0 && localIndex < channels.size())
+                s->movementChannels.push_back (channels[localIndex]->getGlobalIndex());
         }
         s->movChannChanged = true;
     }

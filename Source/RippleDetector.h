@@ -191,6 +191,11 @@ public:
 private:
     StreamSettings<RippleDetectorSettings> settings;
 
+    // True while updateSettings() runs. The editor must not be refreshed then: the
+    // streams are being rebuilt, and the GUI refreshes the editor and viewer itself
+    // once the update is complete (GenericEditor::update).
+    bool updatingSettings { false };
+
     /** Fires the laser through the LaserDriver Pi's web API on every ripple onset (all streams) */
     LaserTrigger laserTrigger;
 
