@@ -22,8 +22,8 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     /* Column 1: channels and calibration */
     int col1 = 10;
 
-    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Ripple_Input", col1, 22);
-    ParameterEditor* rippleInput = getParameterEditor ("Ripple_Input");
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "ripple_channel", col1, 22);
+    ParameterEditor* rippleInput = getParameterEditor ("ripple_channel");
     rippleInput->setLayout (ParameterEditor::Layout::nameOnTop);
     rippleInput->setSize (80, 34);
 
@@ -356,9 +356,10 @@ void RippleDetectorEditor::updateMethodView()
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (movement);
 
-    // The noise drop-down's entries are the stream's channel names, set in the processor's updateSettings()
-    if (auto* ed = getParameterEditor ("noise_channel"))
-        ed->updateView();
+    // The channel drop-downs' entries are the stream's channel names, set in the processor's updateSettings()
+    for (auto* name : { "ripple_channel", "noise_channel" })
+        if (auto* ed = getParameterEditor (name))
+            ed->updateView();
 
     // Feature output toggle reflects the selected stream
     bool featureOut = false;

@@ -208,6 +208,10 @@ private:
     /** Asks the editor to refresh its custom controls */
     void refreshEditor();
 
+    /** Fills a channel drop-down ("ripple_channel" or "noise_channel") with the stream's channel
+        names, optionally after "None", keeping the chosen channel by name */
+    void setChannelChoices (const DataStream* stream, const String& paramName, bool withNone);
+
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);
 

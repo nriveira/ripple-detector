@@ -36,17 +36,29 @@ RippleDetector::RippleDetector() : GenericProcessor ("Ripple Detector")
 void RippleDetector::registerParameters()
 {
     /* Ripple Detection Settings */
-    addSelectedChannelsParameter (
-        Parameter::STREAM_SCOPE,
-        "Ripple_Input",
-        "Ripple Input",
-        "Continuous input channel on which ripples will be detected.",
-        1);
 
-    // Optional noise channel as a drop-down whose first entry is "None". A channel selector
-    // would pre-select the stream's first channel, turning the veto on by default. The
-    // placeholder list is replaced by the stream's channel names in updateSettings(); it
-    // only needs to be long enough for a saved choice to survive loading a configuration.
+    // The ripple and noise channels are drop-downs of the stream's channel names, so the choice
+    // is made by name even when a Channel Map upstream has reordered the channels (a channel
+    // selector shows positions). The placeholder lists are replaced by the channel names in
+    // updateSettings(); they only need to be long enough for a saved choice to survive loading
+    // a configuration. setChannelChoices() keeps each choice on the same channel name.
+    {
+        Array<String> choices;
+        for (int i = 1; i <= MAX_NOISE_CHOICES; i++)
+            choices.add (String (i));
+
+        addCategoricalParameter (
+            Parameter::STREAM_SCOPE,
+            "ripple_channel",
+            "Ripple Input",
+            "Continuous input channel on which ripples (or, in pulse test mode, test pulses) are detected, by channel name. \
+Defaults to the stream's first channel.",
+            choices,
+            0);
+    }
+
+    // The noise channel's first entry is "None" (the default): a channel selector would pre-select
+    // the stream's first channel and turn the veto on by default.
     {
         Array<String> choices { "None" };
         for (int i = 1; i <= MAX_NOISE_CHOICES; i++)
@@ -364,14 +376,10 @@ void RippleDetector::updateSettings()
         if (s->featureOutputActive)
             addFeatureChannels (getDataStream (streamId));
 
-        parameterValueChanged (stream->getParameter ("Ripple_Input"));
-        // Show the stream's own channel names in the noise drop-down
-        {
-            Array<String> choices { "None" };
-            for (auto* channel : stream->getContinuousChannels())
-                choices.add (channel->getName());
-            ((CategoricalParameter*) stream->getParameter ("noise_channel"))->setCategories (choices);
-        }
+        // The channel drop-downs list the stream's own channel names
+        setChannelChoices (stream, "ripple_channel", false);
+        setChannelChoices (stream, "noise_channel", true);
+        parameterValueChanged (stream->getParameter ("ripple_channel"));
         parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
 
@@ -411,6 +419,36 @@ void RippleDetector::updateSettings()
         eventChannels.add (new EventChannel (evSettings));
         eventChannels.getLast()->addProcessor (this);
         s->eventChannel = eventChannels.getLast();
+    }
+}
+
+void RippleDetector::setChannelChoices (const DataStream* stream, const String& paramName, bool withNone)
+{
+    auto* param = (CategoricalParameter*) stream->getParameter (paramName);
+    if (param == nullptr)
+        return;
+
+    // The channel chosen before this update, by name (the categories are still the previous ones)
+    const Array<String> previous = param->getCategories();
+    const int previousIndex = param->getSelectedIndex();
+    const String previousName = isPositiveAndBelow (previousIndex, previous.size()) ? previous[previousIndex] : String();
+
+    Array<String> choices;
+    if (withNone)
+        choices.add ("None");
+    for (auto* channel : stream->getContinuousChannels())
+        choices.add (channel->getName());
+
+    param->setCategories (choices);
+
+    // Keep the choice on the same channel if a Channel Map upstream moved it. "None" stays None,
+    // and a name that is no longer there (e.g. a placeholder from a loaded configuration) keeps
+    // the position.
+    if (previousName.isNotEmpty() && ! (withNone && previousIndex == 0))
+    {
+        const int moved = choices.indexOf (previousName);
+        if (moved >= 0 && moved != param->getSelectedIndex())
+            param->currentValue = moved; // set directly: this runs inside updateSettings()
     }
 }
 
@@ -721,16 +759,14 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     uint16 streamId = param->getStreamId();
     RippleDetectorSettings* s = settings[streamId];
 
-    if (paramName.equalsIgnoreCase ("Ripple_Input"))
+    if (paramName.equalsIgnoreCase ("ripple_channel"))
     {
-        Array<var>* array = param->getValue().getArray();
-
-        // A saved selection can point past the end of a stream with fewer channels
+        // Entry i is the stream's channel i; a stream without channels has none to choose
+        const int choice = ((CategoricalParameter*) param)->getSelectedIndex();
         const auto channels = getDataStream (streamId)->getContinuousChannels();
-        const int localIndex = array->size() > 0 ? int (array->getFirst()) : -1;
 
-        if (localIndex >= 0 && localIndex < channels.size())
-            s->rippleInputChannel = channels[localIndex]->getGlobalIndex();
+        if (choice >= 0 && choice < channels.size())
+            s->rippleInputChannel = channels[choice]->getGlobalIndex();
         else
             s->rippleInputChannel = -1;
     }
