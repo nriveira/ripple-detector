@@ -1,6 +1,7 @@
 #ifndef __PULSE_EDGE_DETECTOR_H
 #define __PULSE_EDGE_DETECTOR_H
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -107,7 +108,7 @@ private:
     int64_t ttlSamples { 300 };
     int settleSamples { 8 };
     std::vector<double> history; // the last RESPONSE_DIFF_MS of samples, for the response's change
-    size_t historyIndex { 0 };
+    std::size_t historyIndex { 0 };
     double alpha { 0.0 }; // baseline update weight per sample
 
     enum class ResponseState

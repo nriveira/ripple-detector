@@ -13,7 +13,7 @@ void PulseEdgeDetector::setParams (const Params& p)
     alpha = 1.0 - std::exp (-1.0 / (fs * BASELINE_TAU_MS / 1000.0));
     settleSamples = std::max (1, (int) std::ceil (fs * SETTLE_MS / 1000.0));
 
-    const size_t diffSamples = (size_t) std::max (1, (int) std::ceil (fs * RESPONSE_DIFF_MS / 1000.0));
+    const std::size_t diffSamples = (std::size_t) std::max (1, (int) std::ceil (fs * RESPONSE_DIFF_MS / 1000.0));
     if (history.size() != diffSamples)
     {
         history.assign (diffSamples, 0.0);
