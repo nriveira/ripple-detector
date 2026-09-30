@@ -47,6 +47,9 @@ public:
         lastMs = 0.0;
     }
 
+    /** Changes how long an onset waits for its edge, keeping the statistics */
+    void setTimeout (int64_t timeoutSamples) { timeout = timeoutSamples; }
+
     /** A ripple TTL went high: eventSample is its sample number, decisionSample the end of its window */
     void onsetEmitted (int64_t eventSample, int64_t decisionSample)
     {

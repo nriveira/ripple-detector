@@ -105,6 +105,21 @@ void testEdgeBeforeOnsetIsNotPaired()
 }
 } // namespace
 
+void testSetTimeoutKeepsStats()
+{
+    // Pulse test mode lengthens the window to the lockout: a 700 ms edge then pairs, and the stats survive
+    StimLatencyMeter m;
+    m.reset (30000.0, 15000); // 500 ms
+    m.onsetEmitted (1000, 1001);
+    m.hardwareEdge (1000 + 300); // 10 ms
+    m.setTimeout (30002); // 1 s lockout
+    m.onsetEmitted (60000, 60001);
+    m.hardwareEdge (60000 + 21000); // 700 ms
+    const auto st = m.getStats();
+    check (st.matched == 2 && st.missed == 0 && st.unmatched == 0, "after setTimeout, a 700 ms edge pairs and earlier pairs are kept");
+    check (near (st.maxMs, 700.0) && near (st.minMs, 10.0), "setTimeout: min / max over both");
+}
+
 int main()
 {
     testPairs();
@@ -112,6 +127,7 @@ int main()
     testEdgeTooLateIsNotPaired();
     testOldestFirst();
     testEdgeBeforeOnsetIsNotPaired();
+    testSetTimeoutKeepsStats();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

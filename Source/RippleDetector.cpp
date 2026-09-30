@@ -7,6 +7,15 @@
 #define LATENCY_TIMEOUT_SECONDS 0.5 // an onset's stimulus must arrive within this long
 #define MAX_NOISE_CHOICES 1024 // channels a saved noise-channel choice can refer to (see registerParameters)
 
+namespace
+{
+/** Pulse test mode: a stimulation artefact can only be found within the lockout, so that is how long an edge waits */
+int64 responseTimeout (const RippleDetectorSettings* s)
+{
+    return (int64) std::ceil (s->pulseParams.sampleRate * s->pulseParams.lockoutMs / 1000.0) + 2;
+}
+} // namespace
+
 RippleDetectorSettings::RippleDetectorSettings()
 {
 }
@@ -108,6 +117,20 @@ shorter than the gap between them.",
         1000,
         0,
         60000,
+        10);
+
+    addFloatParameter (
+        Parameter::STREAM_SCOPE,
+        "resp_thresh",
+        "Resp. Thresh.",
+        "Pulse test mode: when the stimulation is fed back into the same bath, its artefact on the Ripple Input channel is timed \
+against each pulse's edge. Once the test pulse has passed (dropped below this level), the first change of more than this \
+within 0.25 ms is the stimulus. Set it above what is left of the test pulse (its undershoot) and below the stimulation \
+artefact; 0 turns the measurement off. Use short (1 ms) test pulses.",
+        "uV",
+        150,
+        0,
+        1000000,
         10);
 
     addFloatParameter (
@@ -354,6 +377,7 @@ void RippleDetector::updateSettings()
         s->pulseParams.sampleRate = stream->getSampleRate();
         parameterValueChanged (stream->getParameter ("pulse_thresh"));
         parameterValueChanged (stream->getParameter ("pulse_lockout"));
+        parameterValueChanged (stream->getParameter ("resp_thresh"));
         s->pulse.setParams (s->pulseParams);
         s->pulse.reset();
         s->pulseParamsDirty = false;
@@ -517,6 +541,14 @@ const PulseEdgeDetector::Params* RippleDetector::getPulseParams (uint16 streamId
     return &settings[streamId]->pulseParams;
 }
 
+StimLatencyMeter::Stats RippleDetector::getResponseLatencyStats (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return {};
+
+    return settings[streamId]->responseLatency.getStats();
+}
+
 FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
@@ -609,6 +641,7 @@ bool RippleDetector::startAcquisition()
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         s->vetoedOnsets = 0;
         s->pulseDetections = 0;
+        s->responseLatency.reset (stream->getSampleRate(), responseTimeout (s));
         s->latency.reset (stream->getSampleRate(), (int64) (stream->getSampleRate() * LATENCY_TIMEOUT_SECONDS));
     }
 
@@ -624,6 +657,14 @@ bool RippleDetector::stopAcquisition()
         if (s->pulseModeActive)
         {
             LOGC ("Pulse test mode (", stream->getName(), "): ", (int) s->pulseDetections.load(), " pulses detected");
+
+            const auto resp = s->responseLatency.getStats();
+            if (s->pulseParams.responseThresholdUv > 0.0 && (resp.matched > 0 || resp.missed > 0))
+            {
+                LOGC ("Stimulus on the Ripple Input channel (", stream->getName(), "): ", (int) resp.matched,
+                      " paired, mean ", resp.meanMs, " ms (min ", resp.minMs, ", max ", resp.maxMs,
+                      ") from the pulse's edge; ", (int) resp.missed, " pulses without a stimulus");
+            }
         }
         else if (s->noiseInputChannel >= 0)
         {
@@ -702,6 +743,11 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     else if (paramName.equalsIgnoreCase ("pulse_lockout"))
     {
         s->pulseParams.lockoutMs = (float) param->getValue();
+        s->pulseParamsDirty = true;
+    }
+    else if (paramName.equalsIgnoreCase ("resp_thresh"))
+    {
+        s->pulseParams.responseThresholdUv = (float) param->getValue();
         s->pulseParamsDirty = true;
     }
     else if (paramName.equalsIgnoreCase ("stim_in"))
@@ -922,7 +968,10 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         }
 
         if (s->pulseParamsDirty.exchange (false))
+        {
             s->pulse.setParams (s->pulseParams);
+            s->responseLatency.setTimeout (responseTimeout (s));
+        }
 
         // Switching between ripple and pulse test mode
         const bool wantPulse = s->pulseModeRequested.load();
@@ -1149,26 +1198,45 @@ void RippleDetector::processPulses (uint16 streamId, const float* data, int numS
         cursor = std::max (cursor, to);
     };
 
+    const bool measureResponse = s->pulse.getParams().responseThresholdUv > 0.0;
+
     for (const auto& ev : s->pulseEvents)
     {
         markUntil (ev.sampleIndex);
 
-        if (ev.state)
+        switch (ev.type)
         {
-            setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
-            s->pulseDetections++;
+            case PulseEdgeDetector::Event::Onset:
+            {
+                setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+                s->pulseDetections++;
 
-            // Event time: the pulse's first sample above threshold; decision: the confirming sample
-            s->latency.onsetEmitted (firstSample + ev.sampleIndex - ev.edgeOffset, firstSample + ev.sampleIndex);
-            high = true;
-        }
-        else if (high)
-        {
-            setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
-            high = false;
+                // Event time: the pulse's first sample above threshold; decision: the confirming sample
+                const int64 edge = firstSample + ev.sampleIndex - ev.edgeOffset;
+                s->latency.onsetEmitted (edge, firstSample + ev.sampleIndex);
+                if (measureResponse)
+                    s->responseLatency.onsetEmitted (edge, firstSample + ev.sampleIndex);
+                high = true;
+                break;
+            }
+            case PulseEdgeDetector::Event::TtlOff:
+                if (high)
+                {
+                    setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+                    high = false;
+                }
+                break;
+            case PulseEdgeDetector::Event::Response:
+            {
+                // The artefact's first sample; it may have started in the previous block
+                s->responseLatency.hardwareEdge (firstSample + ev.sampleIndex - ev.edgeOffset);
+                s->flagScratch[(size_t) std::max (0, ev.sampleIndex - ev.edgeOffset)] |= FeatureFifo::RESPONSE;
+                break;
+            }
         }
     }
     markUntil (numSamples);
+    s->responseLatency.expire (firstSample + numSamples);
 
     if (featureOut != nullptr)
         std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);

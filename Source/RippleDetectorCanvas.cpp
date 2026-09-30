@@ -23,6 +23,7 @@ const Colour BLOCKED_COLOUR (0xff, 0x90, 0x20);
 const Colour CALIBRATING_COLOUR (0x90, 0x90, 0x90);
 const Colour LOCKOUT_COLOUR (0x60, 0x90, 0xd0); // pulse test mode: detection locked out
 const Colour PULSE_MODE_COLOUR (0xff, 0xc0, 0x30); // pulse test mode banner
+const Colour RESPONSE_COLOUR (0xff, 0x60, 0xe0); // pulse test mode: the stimulation artefact
 
 /** Rounds a step to 1, 2 or 5 times a power of ten */
 float niceStep (float rawStep)
@@ -149,6 +150,7 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     addParameterRow ("detect_mode", true);
     addParameterRow ("pulse_thresh", false);
     addParameterRow ("pulse_lockout", false);
+    addParameterRow ("resp_thresh", false);
     addParameterRow ("ripple_std", false);
     addParameterRow ("time_thresh", false);
     addParameterRow ("refr_time", false);
@@ -278,6 +280,17 @@ void RippleDetectorCanvas::updateCalibrationInfo()
         text = "Pulse test mode: edges " + String (pp != nullptr ? pp->thresholdUv : 0.0, 0) + String::fromUTF8 (" \xc2\xb5V")
                + " from baseline,\nlockout " + String (pp != nullptr ? pp->lockoutMs : 0.0, 0) + " ms. Pulses detected: "
                + String ((int) processor->getPulseDetections (streamId));
+
+        if (pp != nullptr && pp->responseThresholdUv > 0.0)
+        {
+            const auto resp = processor->getResponseLatencyStats (streamId);
+            if (resp.matched > 0)
+                text += "\nStimulus on this channel: " + String (resp.meanMs, 2) + " ms mean (" + String (resp.minMs, 2) + "-"
+                        + String (resp.maxMs, 2) + "), n = " + String ((int) resp.matched) + "\n  last " + String (resp.lastMs, 2)
+                        + " ms; no stimulus: " + String ((int) resp.missed);
+            else
+                text += "\nStimulus on this channel: none yet (no stimulus: " + String ((int) resp.missed) + ")";
+        }
         text += latencyAndLaserText();
     }
     else if (calibrating)
@@ -322,7 +335,7 @@ void RippleDetectorCanvas::updateParameterVisibility()
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (! pulse);
 
-    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+    for (auto* name : { "pulse_thresh", "pulse_lockout", "resp_thresh" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (pulse);
 
@@ -516,6 +529,11 @@ void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const Stre
                 g.setColour (VETO_COLOUR.withAlpha (0.35f));
                 g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
             }
+            if (flags & FeatureFifo::RESPONSE)
+            {
+                g.setColour (RESPONSE_COLOUR);
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
 
             const float yTop = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mx));
             const float yBottom = jlimit ((float) plot.getY(), (float) plot.getBottom(), yFor (mn));
@@ -556,7 +574,8 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
 
     const int rawHeight = (int) ((float) plotArea.getHeight() * (hasNoise ? RAW_FRACTION_WITH_NOISE : RAW_FRACTION));
     drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::RAW,
-             (pulseMode ? "Test pulse channel (" : "Ripple channel (") + uv + ")", RAW_COLOUR, FeatureFifo::TTL_HIGH | FeatureFifo::VETOED);
+             (pulseMode ? "Test pulse channel (" : "Ripple channel (") + uv + ")", RAW_COLOUR,
+             FeatureFifo::TTL_HIGH | FeatureFifo::VETOED | FeatureFifo::RESPONSE);
     area.removeFromTop (8);
 
     if (hasNoise)
@@ -624,6 +643,11 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
             if (flags & FeatureFifo::VETOED)
             {
                 g.setColour (VETO_COLOUR.withAlpha (0.35f));
+                g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
+            }
+            if (flags & FeatureFifo::RESPONSE)
+            {
+                g.setColour (RESPONSE_COLOUR);
                 g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
             }
 
@@ -721,6 +745,8 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         g.drawText ("lockout", plot.getX() + 240, plot.getY() + 4, 60, 18, Justification::centredLeft);
         g.setColour (EVENT_COLOUR);
         g.drawText ("TTL", plot.getX() + 300, plot.getY() + 4, 40, 18, Justification::centredLeft);
+        g.setColour (RESPONSE_COLOUR);
+        g.drawText ("stimulus", plot.getX() + 340, plot.getY() + 4, 70, 18, Justification::centredLeft);
     }
     else
     {

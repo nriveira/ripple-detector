@@ -99,13 +99,14 @@ To measure the closed loop with a known input, set **Detect** to **Pulse (test)*
 
 - **Edge:** the channel is compared with a slowly tracking baseline (20 ms time constant). An edge is two consecutive samples more than **Pulse Thresh.** away from it, in either polarity. The event time is the first of those samples, so the latency runs from the pulse's actual edge.
 - **Lockout:** after an edge, nothing is detected for **Lockout** (default 1000 ms), and detection re-arms only once the signal has settled back to its baseline. This hides the pulse's falling edge, the undershoot of an AC-coupled sound card and the stimulation's own artefact, so each test pulse is paired with exactly one stimulus. Keep the lockout longer than the pulses and shorter than the gaps between them.
+- **Stimulus on the same channel:** when the stimulation is fed back into the bath, its artefact appears on the Ripple Input channel a few milliseconds after the pulse, and is timed against the pulse's edge. Once the test pulse has passed, meaning it stayed below **Resp. Thresh.** (default 150 µV) for 0.5 ms, the first change of more than Resp. Thresh. within 0.25 ms is the stimulus. An isolator's artefact jumps that fast, while the test pulse's AC-coupled undershoot drifts slowly, so the undershoot is never mistaken for it. Set Resp. Thresh. above the test pulse's undershoot and below the artefact; 0 turns this off. With 1 ms test pulses, stimuli from 1.5 ms after the edge are measured, one per pulse, within the lockout. The viewer marks each one, and the side panel and the end-of-run log give the mean, range and last latency, and the pulses without a stimulus. This works alongside the Stim. Input measurement, which needs the trigger on a digital input instead.
 - **Bypassed:** the noise veto and movement gating, which would otherwise suppress a pulse that appears on every electrode in the bath. There is no calibration in this mode.
 - **Viewer:** shows the pulse channel, the level in multiples of the threshold (the threshold line sits at 1), the lockout and the TTL, with a PULSE TEST MODE banner. The side panel counts the pulses and shows the latency.
 - **Switching back** to Ripple recalibrates the stream, since the baseline would otherwise include the test pulses.
 
-The test audio, its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps.
+The test audio (1 ms pulses), its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps.
 
-The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back, so pulse test mode can be tried without saline. `Tools/wav_to_openephys.py` converts any WAV the same way.
+The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back, so pulse test mode can be tried without saline. `Tools/wav_to_openephys.py` converts any WAV the same way, and with `--stim-delay-ms` adds a simulated stimulation artefact at a known delay after every pulse, to check the stimulus timing without hardware.
 
 ### Adding a method
 

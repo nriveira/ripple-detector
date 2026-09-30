@@ -16,7 +16,12 @@ enough silence that the gaps also hold where a looping player wraps around.
 Standard library only:
 
     python3 Tools/make_test_pulses.py
-    python3 Tools/make_test_pulses.py --width-ms 5 --amplitude 0.25 --duration 120
+    python3 Tools/make_test_pulses.py --width-ms 2 --amplitude 0.25 --duration 120
+
+The pulses are 1 ms by default: when the stimulation is fed back into the bath,
+its artefact is timed on the same channel, which needs the test pulse (and the
+undershoot of the sound card's AC coupling) to be over before the stimulus
+arrives. A 1 ms pulse leaves an undershoot of about 12% of its height.
 """
 
 import argparse
@@ -47,7 +52,7 @@ def main():
     ap.add_argument("--out", default=DEFAULT_OUT, help="WAV path (the CSV is written next to it)")
     ap.add_argument("--rate", type=int, default=48000, help="sample rate in Hz (default 48000)")
     ap.add_argument("--duration", type=float, default=60.0, help="length in s (default 60)")
-    ap.add_argument("--width-ms", type=float, default=10.0, help="pulse width in ms (default 10)")
+    ap.add_argument("--width-ms", type=float, default=1.0, help="pulse width in ms (default 1)")
     ap.add_argument("--gap-min", type=float, default=2.0, help="shortest onset-to-onset gap in s (default 2)")
     ap.add_argument("--gap-max", type=float, default=3.0, help="longest onset-to-onset gap in s (default 3)")
     ap.add_argument("--lead-in", type=float, default=2.0, help="silence before the first pulse in s (default 2)")

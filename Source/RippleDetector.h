@@ -70,6 +70,7 @@ public:
     std::atomic<bool> pulseParamsDirty { false };
     std::vector<PulseEdgeDetector::Event> pulseEvents;
     std::atomic<uint32_t> pulseDetections { 0 }; // edges detected this run
+    StimLatencyMeter responseLatency; // pulse edge to the stimulation artefact on the same channel
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
@@ -171,6 +172,9 @@ public:
 
     /** Pulse test mode: the stream's detector settings, or nullptr */
     const PulseEdgeDetector::Params* getPulseParams (uint16 streamId);
+
+    /** Pulse test mode: latency from each pulse's edge to the stimulation artefact on the same channel */
+    StimLatencyMeter::Stats getResponseLatencyStats (uint16 streamId);
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);

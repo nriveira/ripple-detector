@@ -11,6 +11,11 @@ and a polarity inversion are added to make the playback more like a real saline
 test. The result is one electrode channel, CH1, stored as 16-bit samples with the
 Intan resolution of 0.195 uV per bit.
 
+With --stim-delay-ms, a simulated stimulation artefact (--stim-uv, --stim-width-ms)
+is added a fixed time after every pulse, as if the stimulation were fed back into
+the bath. The Ripple Detector's pulse test mode should then report exactly that
+delay as the stimulus latency, which checks the measurement without hardware.
+
 Output (a folder the File Reader opens through its structure.oebin):
 
     <out>/structure.oebin
@@ -20,6 +25,7 @@ Standard library only:
 
     python3 Tools/wav_to_openephys.py
     python3 Tools/wav_to_openephys.py --highpass-hz 20 --invert --noise-uv 15
+    python3 Tools/wav_to_openephys.py --stim-delay-ms 7.5 --out /tmp/stim_check
     python3 Tools/wav_to_openephys.py some_other.wav --out /tmp/other_recording
 """
 
@@ -109,6 +115,10 @@ def main():
     ap.add_argument("--highpass-hz", type=float, default=0.0,
                     help="simulate a sound card's AC coupling with this corner (default 0: off)")
     ap.add_argument("--invert", action="store_true", help="invert the polarity, as many audio outputs do")
+    ap.add_argument("--stim-delay-ms", type=float, default=0.0,
+                    help="add a simulated stimulation artefact this long after every pulse (default 0: none)")
+    ap.add_argument("--stim-uv", type=float, default=400.0, help="simulated artefact height in uV (default 400)")
+    ap.add_argument("--stim-width-ms", type=float, default=0.2, help="simulated artefact width in ms (default 0.2)")
     ap.add_argument("--seed", type=int, default=1, help="random seed for the noise (default 1)")
     args = ap.parse_args()
 
@@ -121,13 +131,32 @@ def main():
     if args.highpass_hz > 0.0:
         y = high_pass(y, args.rate, args.highpass_hz)
 
+    # Pulse onsets in the resampled audio: rising through half of the peak from below
+    onsets = []
+    below = True
+    for i, v in enumerate(y if args.highpass_hz <= 0.0 else resample(x, rate_in, args.rate)):
+        if below and abs(v) > 0.5 * peak:
+            onsets.append(i)
+            below = False
+        elif abs(v) < 0.25 * peak:
+            below = True
+
+    # Simulated stimulation artefact, straight into the bath (not through the sound card)
+    stim = {}
+    if args.stim_delay_ms > 0.0:
+        delay = int(round(args.stim_delay_ms * args.rate / 1000.0))
+        width = max(1, int(round(args.stim_width_ms * args.rate / 1000.0)))
+        for o in onsets:
+            for i in range(o + delay, min(len(y), o + delay + width)):
+                stim[i] = args.stim_uv
+
     gain = (-1.0 if args.invert else 1.0) * args.pulse_uv / peak
     rng = random.Random(args.seed)
     w = 2.0 * math.pi * args.hum_hz / args.rate
     counts = array.array("h", bytes(2 * len(y)))
     clipped = 0
     for i, v in enumerate(y):
-        uv = gain * v + rng.gauss(0.0, args.noise_uv) + args.hum_uv * math.sin(w * i)
+        uv = gain * v + stim.get(i, 0.0) + rng.gauss(0.0, args.noise_uv) + args.hum_uv * math.sin(w * i)
         c = int(round(uv / BIT_VOLTS))
         if c > 32767 or c < -32768:
             clipped += 1
@@ -171,8 +200,9 @@ def main():
         json.dump(oebin, f, indent=3)
 
     print(f"{out}: {len(y)} samples ({len(y) / args.rate:.1f} s) at {args.rate} Hz, 1 channel, "
-          f"peak {args.pulse_uv:g} uV{', inverted' if args.invert else ''}"
-          f"{f', AC-coupled at {args.highpass_hz:g} Hz' if args.highpass_hz > 0 else ''}")
+          f"{len(onsets)} pulses, peak {args.pulse_uv:g} uV{', inverted' if args.invert else ''}"
+          f"{f', AC-coupled at {args.highpass_hz:g} Hz' if args.highpass_hz > 0 else ''}"
+          f"{f', simulated stimulus {args.stim_uv:g} uV at +{args.stim_delay_ms:g} ms' if args.stim_delay_ms > 0 else ''}")
     if clipped:
         print(f"warning: {clipped} samples clipped to the 16-bit range; lower --pulse-uv")
 

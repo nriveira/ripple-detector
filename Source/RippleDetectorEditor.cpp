@@ -71,6 +71,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     // Pulse test mode: its settings take the place of the ripple settings (updateMethodView)
     addRow ("pulse_thresh", col2, ROW_Y[0]);
     addRow ("pulse_lockout", col2, ROW_Y[1]);
+    addRow ("resp_thresh", col2, ROW_Y[2]);
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "detect_mode", col2, ROW_Y[4]);
     ParameterEditor* detectMode = getParameterEditor ("detect_mode");
@@ -324,7 +325,7 @@ void RippleDetectorEditor::updateMethodView()
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (! pulse);
 
-    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+    for (auto* name : { "pulse_thresh", "pulse_lockout", "resp_thresh" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (pulse);
 
