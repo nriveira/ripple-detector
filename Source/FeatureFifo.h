@@ -31,8 +31,7 @@ public:
         BLOCKED = 1 << 2, // detection blocked by movement
         NOISE = 1 << 3, // noise channel above threshold
         VETOED = 1 << 4, // a ripple onset suppressed by the noise channel
-        LOCKOUT = 1 << 5, // pulse test mode: detection locked out after an edge
-        RESPONSE = 1 << 6 // pulse test mode: the stimulation artefact's edge
+        TTL_ONSET = 1 << 5 // test modes: the sample at which the output TTL went high
     };
 
     FeatureFifo() : fifo (1) {}

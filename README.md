@@ -95,20 +95,23 @@ The viewer panel shows the mean, range and last value, and the log gives the run
 
 The pairing is in `Source/StimLatencyMeter.h` and is tested by `Tests/StimLatencyMeterTests.cpp`.
 
-### Pulse test mode
+### Stimulus TTL on another stream
 
-To measure the closed loop with a known input, set **Detect** to **Pulse (test)** and play square test pulses into saline. The detector then looks for the leading edge of a pulse on the Ripple Input channel instead of ripples, and responds exactly as it would to a ripple: Ripple Output TTL (10 ms), laser trigger, and the stimulation latency above.
+When the detection runs on one stream and the stimulus controller's TTL returns on another, for example a File Reader's stream and the acquisition board's digital input, the two have separate sample clocks and cannot be paired directly. Every onset is therefore also registered on each other stream that has a Stim. Input line, at the newest sample that stream had when the trigger was sent. That stream's latency then runs from the moment of sending to the TTL's return, on its own clock. It is shown in the viewer panel with the stream's name. To avoid stray "no stimulus" counts, set Stim. Input to none on streams without the stimulus line, such as the File Reader's.
+
+### Test modes
+
+Two **Detect** modes test the stimulation loop without ripples. Both respond exactly as to a ripple: Ripple Output TTL (10 ms), laser trigger and stimulation latency. Both bypass the noise veto and movement gating and need no calibration, and switching back to Ripple recalibrates the stream. The viewer marks each output TTL with a solid green line at its onset, and shows a banner for the mode.
+
+**Pulse (test)** detects square test pulses in the continuous data of the Ripple Input channel, from the File Reader recording in `Resources/Test Recording` or from test pulses played into saline. Each detection triggers the LaserHAT, whose output TTL returns to the acquisition board's digital input (Stim. Input). The stimulation artefact in the continuous data is analysed offline.
 
 - **Edge:** the channel is compared with a slowly tracking baseline (20 ms time constant). An edge is two consecutive samples more than **Pulse Thresh.** away from it, in either polarity. The event time is the first of those samples, so the latency runs from the pulse's actual edge.
-- **Lockout:** after an edge, nothing is detected for **Lockout** (default 1000 ms), and detection re-arms only once the signal has settled back to its baseline. This hides the pulse's falling edge, the undershoot of an AC-coupled sound card and the stimulation's own artefact, so each test pulse is paired with exactly one stimulus. Keep the lockout longer than the pulses and shorter than the gaps between them.
-- **Stimulus on the same channel:** when the stimulation is fed back into the bath, its artefact appears on the Ripple Input channel a few milliseconds after the pulse, and is timed against the pulse's edge. Once the test pulse has passed, meaning it stayed below **Resp. Thresh.** (default 150 µV) for 0.5 ms, the first change of more than Resp. Thresh. within 0.25 ms is the stimulus. An isolator's artefact jumps that fast, while the test pulse's AC-coupled undershoot drifts slowly, so the undershoot is never mistaken for it. Set Resp. Thresh. above the test pulse's undershoot and below the artefact; 0 turns this off. With 1 ms test pulses, stimuli from 1.5 ms after the edge are measured, one per pulse, within the lockout. The viewer marks each one, and the side panel and the end-of-run log give the mean, range and last latency, and the pulses without a stimulus. This works alongside the Stim. Input measurement, which needs the trigger on a digital input instead.
-- **Bypassed:** the noise veto and movement gating, which would otherwise suppress a pulse that appears on every electrode in the bath. There is no calibration in this mode.
-- **Viewer:** shows the pulse channel, the level in multiples of the threshold (the threshold line sits at 1), the lockout and the TTL, with a PULSE TEST MODE banner. The side panel counts the pulses and shows the latency.
-- **Switching back** to Ripple recalibrates the stream, since the baseline would otherwise include the test pulses.
+- **Lockout:** after an edge, nothing is detected for **Lockout** (default 1000 ms), and detection re-arms only once the signal has settled back to its baseline. This hides the pulse's falling edge, the undershoot of an AC-coupled sound card and the stimulation's own artefact, so each test pulse gets exactly one response. Keep the lockout longer than the pulses and shorter than the gaps between them.
+- **Viewer:** the pulse channel, and the level in multiples of the threshold (the threshold line sits at 1). The side panel counts the pulses and shows the latency.
 
-The test audio (1 ms pulses), its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps.
+**Periodic (test)** sends **Pulses** responses, **Interval** seconds apart, for repeated tests of the stimulation. The first comes one interval after acquisition starts or after switching to this mode. The continuous signal is not used. The side panel shows how many have been sent.
 
-The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back, so pulse test mode can be tried without saline. `Tools/wav_to_openephys.py` converts any WAV the same way, and with `--stim-delay-ms` adds a simulated stimulation artefact at a known delay after every pulse, to check the stimulus timing without hardware.
+The test audio (1 ms pulses), its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps. The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back. `Tools/wav_to_openephys.py` converts any WAV the same way, and with `--stim-delay-ms` adds a simulated stimulation artefact at a known delay after every pulse, for testing an offline analysis.
 
 ### Adding a method
 
@@ -116,10 +119,10 @@ Detection algorithms live in `Source/DetectionMethods/` and have no dependency o
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, and `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (both polarities, AC coupling, stimulation artefacts, lockout, glitches and block sizes). All need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (both polarities, AC coupling, stimulation artefacts, lockout, glitches, block sizes and external onsets), and `Tests/PeriodicScheduleTests.cpp` the periodic test mode's timer. All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests
 ```
 
 ## Building from source

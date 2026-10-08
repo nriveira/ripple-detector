@@ -71,7 +71,8 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     // Pulse test mode: its settings take the place of the ripple settings (updateMethodView)
     addRow ("pulse_thresh", col2, ROW_Y[0]);
     addRow ("pulse_lockout", col2, ROW_Y[1]);
-    addRow ("resp_thresh", col2, ROW_Y[2]);
+    addRow ("periodic_count", col2, ROW_Y[0]);
+    addRow ("periodic_interval", col2, ROW_Y[1]);
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "detect_mode", col2, ROW_Y[4]);
     ParameterEditor* detectMode = getParameterEditor ("detect_mode");
@@ -294,9 +295,9 @@ void RippleDetectorEditor::timerCallback()
 {
     const uint16 streamId = getCurrentStream();
     const bool calibrating = acquisitionIsActive && rippleDetector->isCalibrating (streamId);
-    const bool pulse = rippleDetector->isPulseMode (streamId);
+    const bool pulse = rippleDetector->isTestMode (streamId);
 
-    // Pulse test mode has no baseline to calibrate
+    // The test modes have no baseline to calibrate
     calibrateButton->setLabel (pulse ? String ("CALIBRATE") : calibrateButtonText (rippleDetector, streamId, acquisitionIsActive));
     calibrateButton->setEnabledState (! calibrating && ! pulse);
 }
@@ -318,16 +319,21 @@ void RippleDetectorEditor::selectedStreamHasChanged()
 
 void RippleDetectorEditor::updateMethodView()
 {
-    // Pulse test mode replaces the ripple settings with its own; the noise channel is bypassed
-    const bool pulse = rippleDetector->isPulseMode (getCurrentStream());
+    // The test modes replace the ripple settings with their own; the noise channel is bypassed
+    const int testMode = rippleDetector->getTestMode (getCurrentStream());
+    const bool pulse = testMode != RippleDetector::TEST_OFF;
 
     for (auto* name : { "ripple_std", "time_thresh", "refr_time", "rms_samples", "baseline", "noise_channel" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (! pulse);
 
-    for (auto* name : { "pulse_thresh", "pulse_lockout", "resp_thresh" })
+    for (auto* name : { "pulse_thresh", "pulse_lockout" })
         if (auto* ed = getParameterEditor (name))
-            ed->setVisible (pulse);
+            ed->setVisible (testMode == RippleDetector::TEST_PULSE);
+
+    for (auto* name : { "periodic_count", "periodic_interval" })
+        if (auto* ed = getParameterEditor (name))
+            ed->setVisible (testMode == RippleDetector::TEST_PERIODIC);
 
     // Adaptive baseline time constant
     bool adaptive = false;

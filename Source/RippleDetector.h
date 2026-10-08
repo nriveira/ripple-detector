@@ -9,9 +9,10 @@
 #include <vector>
 
 #include "DetectionMethods/DetectionMethod.h"
-#include "DetectionMethods/PulseEdgeDetector.h"
 #include "DetectionMethods/NoiseVeto.h"
 #include "FeatureFifo.h"
+#include "DetectionMethods/PulseEdgeDetector.h"
+#include "PeriodicSchedule.h"
 #include "LaserTrigger.h"
 #include "StimLatencyMeter.h"
 
@@ -60,17 +61,23 @@ public:
     ContinuousChannel* thresholdChannel { nullptr }; // RIP_THR: baseline mean + x SD
     ContinuousChannel* eventChannelOut { nullptr }; // RIP_EVENT: threshold-height pulse while a ripple is detected
 
-    // --- Pulse test mode (debug) ---
-    // Detects square test pulses on the ripple input instead of ripples, with the same
-    // outputs (TTL, laser, latency), to measure the closed loop with a known input.
-    std::atomic<bool> pulseModeRequested { false }; // "detect_mode" parameter (message thread)
-    bool pulseModeActive { false }; // audio thread
+    // --- Test modes ---
+    // Pulse (test): detect square test pulses on the Ripple Input channel; Periodic (test):
+    // respond on a timer, ignoring the channel. Both respond as to a ripple (TTL, laser, latency).
+    std::atomic<int> testModeRequested { 0 }; // "detect_mode": TEST_OFF, TEST_PULSE or TEST_PERIODIC (message thread)
+    int testModeActive { 0 }; // audio thread
     PulseEdgeDetector pulse;
-    PulseEdgeDetector::Params pulseParams; // written by parameterValueChanged, handed over with pulseParamsDirty
-    std::atomic<bool> pulseParamsDirty { false };
+    PulseEdgeDetector::Params pulseParams; // written by parameterValueChanged, handed over with testParamsDirty
+    PeriodicSchedule periodic;
+    int periodicCount { 10 }; // "periodic_count"
+    double periodicIntervalS { 2.0 }; // "periodic_interval"
+    std::atomic<bool> testParamsDirty { false };
+    bool testRestart { true }; // restart the detector / schedule at the next block (acquisition start, mode switch)
+    std::vector<int> externalOnsets; // periodic onsets in this block
     std::vector<PulseEdgeDetector::Event> pulseEvents;
-    std::atomic<uint32_t> pulseDetections { 0 }; // edges detected this run
-    StimLatencyMeter responseLatency; // pulse edge to the stimulation artefact on the same channel
+    std::atomic<uint32_t> testTriggered { 0 }; // responses this run
+    std::atomic<uint32_t> testIgnored { 0 }; // pulses ignored in the lockout this run (detected pulses re-arm, so mostly 0)
+    std::atomic<uint32_t> periodicSent { 0 };
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
@@ -164,17 +171,29 @@ public:
     /** Pairs the stimulus controller's hardware trigger with the ripple onsets */
     void handleTTLEvent (TTLEventPtr event) override;
 
-    /** True when the stream detects test pulses instead of ripples ("detect_mode") */
-    bool isPulseMode (uint16 streamId);
+    /** "detect_mode" values */
+    static constexpr int TEST_OFF = 0; // ripple detection
+    static constexpr int TEST_PULSE = 1; // Pulse (test)
+    static constexpr int TEST_PERIODIC = 2; // Periodic (test)
 
-    /** Pulse test mode: edges detected on the stream this run */
-    uint32_t getPulseDetections (uint16 streamId);
+    /** The stream's "detect_mode": TEST_OFF, TEST_PULSE or TEST_PERIODIC */
+    int getTestMode (uint16 streamId);
 
-    /** Pulse test mode: the stream's detector settings, or nullptr */
-    const PulseEdgeDetector::Params* getPulseParams (uint16 streamId);
+    /** True in either test mode */
+    bool isTestMode (uint16 streamId) { return getTestMode (streamId) != TEST_OFF; }
 
-    /** Pulse test mode: latency from each pulse's edge to the stimulation artefact on the same channel */
-    StimLatencyMeter::Stats getResponseLatencyStats (uint16 streamId);
+    struct TestStats
+    {
+        uint32_t triggered; // responses this run
+        uint32_t periodicSent; // Periodic: responses sent this run
+        double thresholdUv; // Pulse: Pulse Thresh.
+        double lockoutMs; // Pulse: Lockout
+        int periodicCount;
+        double periodicIntervalS;
+    };
+
+    /** The test modes' settings and counts for a stream */
+    TestStats getTestStats (uint16 streamId);
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);
@@ -205,6 +224,12 @@ private:
     /** Marks the current parameter values to be pushed to the stream's method */
     void applyParams (uint16 streamId);
 
+    /** Streams that emitted an onset in the current process() call (for relayOnsets) */
+    std::vector<uint16> firedStreams;
+
+    /** Registers this call's onsets on every other stream with a Stim. Input line, on that stream's clock */
+    void relayOnsets();
+
     /** Asks the editor to refresh its custom controls */
     void refreshEditor();
 
@@ -218,9 +243,12 @@ private:
     /** Runs the method on the ripple channel, applies the noise veto and emits the events */
     void processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
 
-    /** Pulse test mode: detects test-pulse edges and drives the same outputs as a ripple */
-    void processPulses (uint16 streamId, const float* data, int numSamples, int64 firstSample,
-                        float* featureOut, float* thresholdOut, float* eventOut);
+    /** Test modes: responds to detected test pulses or the periodic timer with the same outputs as a ripple */
+    void processTestTrigger (uint16 streamId, const float* data, int numSamples, int64 firstSample,
+                             float* featureOut, float* thresholdOut, float* eventOut);
+
+    /** RIP_EVENT's level while a periodic test response's TTL is high (there is no threshold in that mode) */
+    static constexpr float TEST_EVENT_LEVEL = 1000.0f;
 
     /** Z-scores the block's features and hands them, with the raw ripple channel, to the viewer queue */
     void publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples);

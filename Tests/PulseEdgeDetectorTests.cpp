@@ -1,9 +1,11 @@
 /*
-    Standalone tests for the debug pulse-edge detector (Source/DetectionMethods/PulseEdgeDetector).
+    Standalone tests for the pulse test mode's edge detector (Source/DetectionMethods/PulseEdgeDetector).
 
-    The signals mimic test pulses picked up in saline: Gaussian noise and mains hum, square
-    pulses of either polarity, optionally through an AC coupling (high-pass) like a sound
-    card output, and a short artefact from the stimulation that follows each pulse.
+    The signals mimic test pulses picked up in saline or replayed from a recording: Gaussian
+    noise and mains hum, square pulses of either polarity, optionally through an AC coupling
+    (high-pass) like a sound card output, and a short artefact from the stimulation that
+    follows each pulse (which the lockout must hide). Also external onsets, as the periodic
+    test mode gives them.
 */
 
 #include "DetectionMethods/PulseEdgeDetector.h"
@@ -93,17 +95,10 @@ struct Onset
     int64_t edge;
 };
 
-struct Response
-{
-    int64_t edge; // absolute sample of the response's first crossing
-    int64_t latency; // samples from the pulse's edge
-};
-
 struct Result
 {
     std::vector<Onset> onsets;
     std::vector<int64_t> offsets;
-    std::vector<Response> responses;
 };
 
 Result run (const std::vector<float>& x, PulseEdgeDetector::Params p, int block)
@@ -123,12 +118,44 @@ Result run (const std::vector<float>& x, PulseEdgeDetector::Params p, int block)
         {
             if (e.type == PulseEdgeDetector::Event::Onset)
                 r.onsets.push_back ({ pos + e.sampleIndex, pos + e.sampleIndex - e.edgeOffset });
-            else if (e.type == PulseEdgeDetector::Event::TtlOff)
-                r.offsets.push_back (pos + e.sampleIndex);
             else
-                r.responses.push_back ({ pos + e.sampleIndex - e.edgeOffset, e.latencySamples });
+                r.offsets.push_back (pos + e.sampleIndex);
         }
     }
+    return r;
+}
+
+/** Like run(), but the pulses' edges are given as external onsets (absolute samples), as from a TTL line */
+Result runExternal (const std::vector<float>& x, PulseEdgeDetector::Params p, int block, const std::vector<int64_t>& edges,
+                    uint32_t* ignored = nullptr)
+{
+    PulseEdgeDetector d;
+    d.setParams (p);
+    d.reset();
+
+    Result r;
+    std::vector<PulseEdgeDetector::Event> events;
+    std::vector<int> onsets;
+    for (int64_t pos = 0; pos < (int64_t) x.size(); pos += block)
+    {
+        const int len = (int) std::min<int64_t> (block, (int64_t) x.size() - pos);
+        onsets.clear();
+        for (int64_t e : edges)
+            if (e >= pos && e < pos + len)
+                onsets.push_back ((int) (e - pos));
+
+        events.clear();
+        d.process (x.data() + pos, len, events, nullptr, nullptr, &onsets);
+        for (const auto& e : events)
+        {
+            if (e.type == PulseEdgeDetector::Event::Onset)
+                r.onsets.push_back ({ pos + e.sampleIndex, pos + e.sampleIndex - e.edgeOffset });
+            else
+                r.offsets.push_back (pos + e.sampleIndex);
+        }
+    }
+    if (ignored != nullptr)
+        *ignored = d.getIgnoredExternal();
     return r;
 }
 
@@ -276,21 +303,14 @@ void testBlockSizes()
     const auto pulses = pulseTrain (n, -800.0, 30);
     Options o;
     o.highPassHz = 20.0;
-    o.artefactUv = 400.0;
-    o.artefactDelay = 250;
-    o.artefactLength = 6;
     const auto x = makeSignal (n, pulses, o);
 
-    auto p = defaults();
-    p.responseThresholdUv = 150.0;
-    const auto a = run (x, p, 1024);
-    check (a.responses.size() == pulses.size(), "blocks: a response per pulse in the reference run");
+    const auto a = run (x, defaults(), 1024);
+    check (a.onsets.size() == pulses.size(), "blocks: every pulse in the reference run");
     for (int block : { 1, 7, 128, 333, 4096 })
     {
-        const auto b = run (x, p, block);
-        bool same = a.onsets.size() == b.onsets.size() && a.offsets == b.offsets && a.responses.size() == b.responses.size();
-        for (size_t k = 0; same && k < a.responses.size(); k++)
-            same = a.responses[k].edge == b.responses[k].edge && a.responses[k].latency == b.responses[k].latency;
+        const auto b = run (x, defaults(), block);
+        bool same = a.onsets.size() == b.onsets.size() && a.offsets == b.offsets;
         for (size_t k = 0; same && k < a.onsets.size(); k++)
             same = a.onsets[k].decision == b.onsets[k].decision && a.onsets[k].edge == b.onsets[k].edge;
         check (same, "blocks of " + std::to_string (block) + " give identical edges");
@@ -310,91 +330,59 @@ void testEdgeAtBlockBoundary()
     check (r.onsets.size() == 1 && r.onsets[0].edge == pulses[0].start && r.onsets[0].decision == pulses[0].start + 1,
            "boundary: edge on the previous block's last sample, decision on the next block's first");
 }
-void testResponse()
+void testExternalOnsets()
 {
-    std::printf ("Stimulation response on the same channel (1 ms AC-coupled test pulses)\n");
+    std::printf ("External onsets (pulse edges from a TTL line)\n");
     const int64_t n = (int64_t) (40 * FS);
-    const auto pulses = pulseTrain (n, 1000.0, 30); // 1 ms test pulses
-
-    auto p = defaults();
-    p.responseThresholdUv = 150.0;
-
-    // Artefacts from 2 ms to 400 ms after the pulse, either polarity, larger or smaller than the pulse
-    struct Case
-    {
-        double delayMs;
-        double artefactUv;
-    };
-    for (const Case c : { Case { 2.0, 400.0 }, Case { 3.0, -400.0 }, Case { 5.0, -400.0 }, Case { 12.0, 3000.0 },
-                          Case { 40.0, 250.0 }, Case { 400.0, -2000.0 } })
-    {
-        Options o;
-        o.highPassHz = 20.0;
-        o.artefactUv = c.artefactUv;
-        o.artefactDelay = (int64_t) std::llround (c.delayMs * FS / 1000.0);
-        o.artefactLength = 6; // 0.2 ms, like an isolator's pulse
-        const auto r = run (makeSignal (n, pulses, o), p, 1024);
-
-        char name[96];
-        std::snprintf (name, sizeof (name), "response %.1f ms, %.0f uV", c.delayMs, c.artefactUv);
-        checkOnePerPulse (name, r, pulses, 1);
-        check (r.responses.size() == pulses.size(), std::string (name) + ": one response per pulse (" + std::to_string (r.responses.size()) + ")");
-
-        int64_t worst = 0;
-        for (const auto& resp : r.responses)
-            worst = std::max (worst, std::llabs (resp.latency - o.artefactDelay));
-        check (worst <= 1, std::string (name) + ": latency within 1 sample (worst " + std::to_string (worst) + ")");
-        std::printf ("  %-32s %zu responses, worst latency error %lld samples\n", name, r.responses.size(), (long long) worst);
-    }
-}
-
-void testResponseRejections()
-{
-    std::printf ("Response: no false responses\n");
-    const int64_t n = (int64_t) (40 * FS);
-    auto p = defaults();
-    p.responseThresholdUv = 150.0;
-
-    // No stimulation at all, with noise, hum and the pulses' AC undershoot (about 12% of 1000 uV)
-    Options o;
-    o.highPassHz = 20.0;
     const auto pulses = pulseTrain (n, 1000.0, 30);
-    const auto r = run (makeSignal (n, pulses, o), p, 1024);
-    check (r.onsets.size() == pulses.size() && r.responses.empty(),
-           "no stimulus: pulses detected, no responses (" + std::to_string (r.responses.size()) + ")");
+    std::vector<int64_t> edges;
+    for (const auto& p : pulses)
+        edges.push_back (p.start);
 
-    // 10 ms AC-coupled pulses: the falling edge's undershoot (about 70%) is not a response...
-    const auto longPulses = pulseTrain (n, 1000.0, 300);
-    const auto r2 = run (makeSignal (n, longPulses, o), p, 1024);
-    check (r2.responses.empty(), "10 ms pulses: the falling edge and undershoot are not responses (" + std::to_string (r2.responses.size()) + ")");
+    // File Reader case: the TTL edges only, nothing on the channel
+    {
+        const auto x = makeSignal (n, {}, {});
+        const auto r = runExternal (x, defaults(), 1024, edges);
+        bool exact = r.onsets.size() == edges.size();
+        for (size_t k = 0; exact && k < edges.size(); k++)
+            exact = r.onsets[k].edge == edges[k] && r.onsets[k].decision == edges[k];
+        check (exact, "TTL only: one onset exactly at every edge (" + std::to_string (r.onsets.size()) + ")");
+        bool widths = r.offsets.size() == r.onsets.size();
+        for (size_t k = 0; widths && k < r.offsets.size(); k++)
+            widths = r.offsets[k] - r.onsets[k].decision == 300;
+        check (widths, "TTL only: 10 ms output pulses");
+    }
 
-    // ...and a stimulus on top of a long pulse cannot be separated from it (documented limitation)
-    Options early = o;
-    early.artefactUv = 400.0;
-    early.artefactDelay = 150; // 5 ms, during the 10 ms pulse
-    early.artefactLength = 6;
-    const auto r3 = run (makeSignal (n, longPulses, early), p, 1024);
-    check (r3.responses.empty(), "stimulus during a long pulse: not reported rather than mis-timed (" + std::to_string (r3.responses.size()) + ")");
+    // The channel's own crossings are not used: pulses on the channel, no TTL edges
+    {
+        const auto r = runExternal (makeSignal (n, pulses, {}), defaults(), 1024, {});
+        check (r.onsets.empty(), "external mode: pulses on the channel alone are not detected (" + std::to_string (r.onsets.size()) + ")");
+    }
 
-    // Response measurement off
-    auto off = p;
-    off.responseThresholdUv = 0.0;
-    Options withArtefact = o;
-    withArtefact.artefactUv = 400.0;
-    withArtefact.artefactDelay = 150;
-    withArtefact.artefactLength = 6;
-    const auto r4 = run (makeSignal (n, pulses, withArtefact), off, 1024);
-    check (r4.responses.empty() && r4.onsets.size() == pulses.size(), "Resp. Thresh. 0: no response measurement");
+    // Edges during the lockout are ignored and counted
+    {
+        std::vector<int64_t> dense = { (int64_t) (1.0 * FS), (int64_t) (1.4 * FS), (int64_t) (2.2 * FS), (int64_t) (2.5 * FS) };
+        uint32_t ignored = 0;
+        const auto r = runExternal (makeSignal ((int64_t) (4 * FS), {}, {}), defaults(), 1024, dense, &ignored);
+        check (r.onsets.size() == 2 && r.onsets[0].edge == dense[0] && r.onsets[1].edge == dense[2],
+               "external lockout: edges 0.4 s and 0.3 s after a pulse are ignored");
+        check (ignored == 2, "external lockout: ignored edges counted (" + std::to_string (ignored) + ")");
+    }
 
-    // A stimulus later than the lockout is not a response: it is detected as a new pulse edge
-    const std::vector<Pulse> spaced = { { (int64_t) (1.0 * FS), 30, 1000.0 },
-                                        { (int64_t) (6.0 * FS), 30, 1000.0 },
-                                        { (int64_t) (11.0 * FS), 30, 1000.0 } };
-    Options late = withArtefact;
-    late.artefactDelay = (int64_t) (1.2 * FS);
-    const auto r5 = run (makeSignal ((int64_t) (15 * FS), spaced, late), p, 1024);
-    check (r5.responses.empty(), "stimulus after the lockout: not a response (" + std::to_string (r5.responses.size()) + ")");
-    check (r5.onsets.size() == 6, "stimulus after the lockout: detected as an edge of its own (" + std::to_string (r5.onsets.size()) + ")");
+    // Periodic use: onsets every 0.5 s with a lockout of 0.45 s are all accepted
+    {
+        std::vector<int64_t> ticks;
+        for (int k = 1; k <= 8; k++)
+            ticks.push_back ((int64_t) (k * 0.5 * FS));
+        auto p = defaults();
+        p.lockoutMs = 450.0;
+        uint32_t ignored = 0;
+        const auto r = runExternal (makeSignal ((int64_t) (5 * FS), {}, {}), p, 777, ticks, &ignored);
+        bool exact = r.onsets.size() == ticks.size() && ignored == 0;
+        for (size_t k = 0; exact && k < ticks.size(); k++)
+            exact = r.onsets[k].edge == ticks[k];
+        check (exact, "periodic onsets 0.5 s apart, lockout 0.45 s: every onset exactly on time");
+    }
 }
 } // namespace
 
@@ -407,8 +395,7 @@ int main()
     testGlitchesAndNoise();
     testBlockSizes();
     testEdgeAtBlockBoundary();
-    testResponse();
-    testResponseRejections();
+    testExternalOnsets();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -7,15 +7,6 @@
 #define LATENCY_TIMEOUT_SECONDS 0.5 // an onset's stimulus must arrive within this long
 #define MAX_NOISE_CHOICES 1024 // channels a saved noise-channel choice can refer to (see registerParameters)
 
-namespace
-{
-/** Pulse test mode: a stimulation artefact can only be found within the lockout, so that is how long an edge waits */
-int64 responseTimeout (const RippleDetectorSettings* s)
-{
-    return (int64) std::ceil (s->pulseParams.sampleRate * s->pulseParams.lockoutMs / 1000.0) + 2;
-}
-} // namespace
-
 RippleDetectorSettings::RippleDetectorSettings()
 {
 }
@@ -51,7 +42,7 @@ void RippleDetector::registerParameters()
             Parameter::STREAM_SCOPE,
             "ripple_channel",
             "Ripple Input",
-            "Continuous input channel on which ripples (or, in pulse test mode, test pulses) are detected, by channel name. \
+            "Continuous input channel on which ripples are detected, by channel name (in the test modes it is only shown). \
 Defaults to the stream's first channel.",
             choices,
             0);
@@ -94,23 +85,24 @@ controller), excluding the headstage-to-board and stimulator latencies.",
         false,
         true);
 
-    /* Pulse test mode (debug) */
+    /* Test modes */
     addCategoricalParameter (
         Parameter::STREAM_SCOPE,
         "detect_mode",
         "Detect",
         "Ripple: detect sharp-wave ripples (normal use). Pulse (test): detect the leading edge of square test pulses on the \
-Ripple Input channel instead, e.g. pulses played into saline, with the same response as a ripple (Ripple Output TTL, laser \
-trigger, stimulation latency). Noise veto and movement gating are bypassed in pulse mode; switching back to Ripple \
-recalibrates the stream.",
-        { "Ripple", "Pulse (test)" },
+Ripple Input channel (from a File Reader recording, or played into saline) and respond exactly as to a ripple (Ripple Output \
+TTL, laser trigger, stimulation latency). Periodic (test): respond Pulses times, Interval seconds apart, ignoring the \
+continuous signal, for repeated tests of the stimulation. The test modes bypass the noise veto and movement gating, and \
+switching back to Ripple recalibrates the stream.",
+        { "Ripple", "Pulse (test)", "Periodic (test)" },
         0);
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
         "pulse_thresh",
         "Pulse Thresh.",
-        "Pulse test mode: distance from the channel's running baseline, in the channel's units (uV for headstage channels), \
+        "Pulse (test) mode: distance from the channel's running baseline, in the channel's units (uV for headstage channels), \
 that counts as a pulse edge. Either polarity. Must hold for 2 consecutive samples.",
         "uV",
         200,
@@ -122,8 +114,8 @@ that counts as a pulse edge. Either polarity. Must hold for 2 consecutive sample
         Parameter::STREAM_SCOPE,
         "pulse_lockout",
         "Lockout",
-        "Pulse test mode: no new pulse is detected for this long after one, so the pulse's falling edge, the undershoot of an \
-AC-coupled source and the stimulation's own artefact are not detected as pulses. Keep it longer than the test pulses and \
+        "Pulse (test) mode: no new pulse is detected for this long after one, so the pulse's falling edge, the undershoot of \
+an AC-coupled source and the stimulation's own artefact are not detected as pulses. Keep it longer than the test pulses and \
 shorter than the gap between them.",
         "ms",
         1000,
@@ -131,19 +123,26 @@ shorter than the gap between them.",
         60000,
         10);
 
+    addIntParameter (
+        Parameter::STREAM_SCOPE,
+        "periodic_count",
+        "Pulses",
+        "Periodic (test) mode: how many responses to send. The sequence starts one Interval after acquisition starts (or after \
+switching to this mode).",
+        10,
+        1,
+        100000);
+
     addFloatParameter (
         Parameter::STREAM_SCOPE,
-        "resp_thresh",
-        "Resp. Thresh.",
-        "Pulse test mode: when the stimulation is fed back into the same bath, its artefact on the Ripple Input channel is timed \
-against each pulse's edge. Once the test pulse has passed (dropped below this level), the first change of more than this \
-within 0.25 ms is the stimulus. Set it above what is left of the test pulse (its undershoot) and below the stimulation \
-artefact; 0 turns the measurement off. Use short (1 ms) test pulses.",
-        "uV",
-        150,
-        0,
-        1000000,
-        10);
+        "periodic_interval",
+        "Interval",
+        "Periodic (test) mode: time between responses.",
+        "s",
+        2,
+        0.1,
+        3600,
+        0.1);
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
@@ -331,6 +330,7 @@ with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's
 void RippleDetector::updateSettings()
 {
     const ScopedValueSetter<bool> updating (updatingSettings, true);
+    firedStreams.reserve (256);
 
     settings.update (getDataStreams());
     configureLaserTrigger (true);
@@ -387,12 +387,13 @@ void RippleDetector::updateSettings()
         s->pulseParams.sampleRate = stream->getSampleRate();
         parameterValueChanged (stream->getParameter ("pulse_thresh"));
         parameterValueChanged (stream->getParameter ("pulse_lockout"));
-        parameterValueChanged (stream->getParameter ("resp_thresh"));
-        s->pulse.setParams (s->pulseParams);
-        s->pulse.reset();
-        s->pulseParamsDirty = false;
+        parameterValueChanged (stream->getParameter ("periodic_count"));
+        parameterValueChanged (stream->getParameter ("periodic_interval"));
+        s->testParamsDirty = true; // applied with the current mode at the first block
+        s->testRestart = true;
+        s->externalOnsets.reserve (64);
         parameterValueChanged (stream->getParameter ("detect_mode"));
-        s->pulseModeActive = s->pulseModeRequested;
+        s->testModeActive = s->testModeRequested;
         parameterValueChanged (stream->getParameter ("Ripple_Out"));
         parameterValueChanged (stream->getParameter ("ripple_std"));
         parameterValueChanged (stream->getParameter ("time_thresh"));
@@ -557,36 +558,22 @@ uint32_t RippleDetector::getVetoedOnsets (uint16 streamId)
     return settings[streamId]->vetoedOnsets.load();
 }
 
-bool RippleDetector::isPulseMode (uint16 streamId)
-{
-    if (streamId == 0 || getDataStream (streamId) == nullptr)
-        return false;
-
-    return settings[streamId]->pulseModeRequested;
-}
-
-uint32_t RippleDetector::getPulseDetections (uint16 streamId)
+int RippleDetector::getTestMode (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
         return 0;
 
-    return settings[streamId]->pulseDetections;
+    return settings[streamId]->testModeRequested;
 }
 
-const PulseEdgeDetector::Params* RippleDetector::getPulseParams (uint16 streamId)
-{
-    if (streamId == 0 || getDataStream (streamId) == nullptr)
-        return nullptr;
-
-    return &settings[streamId]->pulseParams;
-}
-
-StimLatencyMeter::Stats RippleDetector::getResponseLatencyStats (uint16 streamId)
+RippleDetector::TestStats RippleDetector::getTestStats (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
         return {};
 
-    return settings[streamId]->responseLatency.getStats();
+    const RippleDetectorSettings* s = settings[streamId];
+    return { s->testTriggered.load(), s->periodicSent.load(), s->pulseParams.thresholdUv, s->pulseParams.lockoutMs,
+             s->periodicCount, s->periodicIntervalS };
 }
 
 FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
@@ -675,7 +662,10 @@ void RippleDetector::handleTTLEvent (TTLEventPtr event)
 {
     RippleDetectorSettings* s = settings[event->getStreamId()];
 
-    if (s != nullptr && s->stimInputLine >= 0 && event->getLine() == s->stimInputLine && event->getState())
+    if (s == nullptr || ! event->getState())
+        return;
+
+    if (s->stimInputLine >= 0 && event->getLine() == s->stimInputLine)
         s->latency.hardwareEdge (event->getSampleNumber());
 }
 
@@ -685,8 +675,11 @@ bool RippleDetector::startAcquisition()
     {
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         s->vetoedOnsets = 0;
-        s->pulseDetections = 0;
-        s->responseLatency.reset (stream->getSampleRate(), responseTimeout (s));
+        // Each run starts the test sequence afresh (the periodic schedule, the counts)
+        s->testRestart = true;
+        s->testTriggered = 0;
+        s->testIgnored = 0;
+        s->periodicSent = 0;
         s->latency.reset (stream->getSampleRate(), (int64) (stream->getSampleRate() * LATENCY_TIMEOUT_SECONDS));
     }
 
@@ -699,17 +692,14 @@ bool RippleDetector::stopAcquisition()
     {
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         // (LOGC expands with its own semicolon, so if / else need braces)
-        if (s->pulseModeActive)
+        if (s->testModeActive == TEST_PULSE)
         {
-            LOGC ("Pulse test mode (", stream->getName(), "): ", (int) s->pulseDetections.load(), " pulses detected");
-
-            const auto resp = s->responseLatency.getStats();
-            if (s->pulseParams.responseThresholdUv > 0.0 && (resp.matched > 0 || resp.missed > 0))
-            {
-                LOGC ("Stimulus on the Ripple Input channel (", stream->getName(), "): ", (int) resp.matched,
-                      " paired, mean ", resp.meanMs, " ms (min ", resp.minMs, ", max ", resp.maxMs,
-                      ") from the pulse's edge; ", (int) resp.missed, " pulses without a stimulus");
-            }
+            LOGC ("Pulse test mode (", stream->getName(), "): ", (int) s->testTriggered.load(), " pulses detected");
+        }
+        else if (s->testModeActive == TEST_PERIODIC)
+        {
+            LOGC ("Periodic test mode (", stream->getName(), "): ", (int) s->periodicSent.load(), " of ", s->periodicCount,
+                  " responses sent, every ", s->periodicIntervalS, " s");
         }
         else if (s->noiseInputChannel >= 0)
         {
@@ -773,23 +763,28 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     else if (paramName.equalsIgnoreCase ("detect_mode"))
     {
         // Picked up by the audio thread at its next block (process())
-        s->pulseModeRequested = ((CategoricalParameter*) param)->getSelectedIndex() == 1;
+        s->testModeRequested = jlimit (0, 2, ((CategoricalParameter*) param)->getSelectedIndex());
         refreshEditor();
     }
     else if (paramName.equalsIgnoreCase ("pulse_thresh"))
     {
         s->pulseParams.thresholdUv = (float) param->getValue();
-        s->pulseParamsDirty = true;
+        s->testParamsDirty = true;
     }
     else if (paramName.equalsIgnoreCase ("pulse_lockout"))
     {
         s->pulseParams.lockoutMs = (float) param->getValue();
-        s->pulseParamsDirty = true;
+        s->testParamsDirty = true;
     }
-    else if (paramName.equalsIgnoreCase ("resp_thresh"))
+    else if (paramName.equalsIgnoreCase ("periodic_count"))
     {
-        s->pulseParams.responseThresholdUv = (float) param->getValue();
-        s->pulseParamsDirty = true;
+        s->periodicCount = (int) param->getValue();
+        s->testParamsDirty = true;
+    }
+    else if (paramName.equalsIgnoreCase ("periodic_interval"))
+    {
+        s->periodicIntervalS = (float) param->getValue();
+        s->testParamsDirty = true;
     }
     else if (paramName.equalsIgnoreCase ("stim_in"))
     {
@@ -962,6 +957,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
 {
     // Upstream TTLs, for the stimulation latency (handleTTLEvent)
     checkForEvents();
+    firedStreams.clear();
 
     // The calibrate button applies to every stream
     const bool calibrateAll = shouldCalibrate.exchange (false);
@@ -1010,34 +1006,42 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
         }
 
-        if (s->pulseParamsDirty.exchange (false))
+        // Switching between ripple detection and the test modes
+        const int wantMode = s->testModeRequested.load();
+        if (wantMode != s->testModeActive)
+            s->testParamsDirty = true; // the lockout depends on the mode
+
+        if (s->testParamsDirty.exchange (false))
         {
-            s->pulse.setParams (s->pulseParams);
-            s->responseLatency.setTimeout (responseTimeout (s));
+            // Periodic onsets must never fall in the lockout: keep it shorter than the interval
+            PulseEdgeDetector::Params p = s->pulseParams;
+            if (wantMode == TEST_PERIODIC)
+                p.lockoutMs = 0.9 * s->periodicIntervalS * 1000.0;
+            s->pulse.setParams (p);
+            s->periodic.configure (p.sampleRate, s->periodicCount, s->periodicIntervalS);
         }
 
-        // Switching between ripple and pulse test mode
-        const bool wantPulse = s->pulseModeRequested.load();
-        if (wantPulse != s->pulseModeActive)
+        if (wantMode != s->testModeActive)
         {
-            s->pulseModeActive = wantPulse;
+            const bool wasTest = s->testModeActive != TEST_OFF;
+            s->testModeActive = wantMode;
 
             if (s->rippleTtlHigh)
                 setRippleTtl (streamId, false, 0, firstSampleInBlock);
 
-            if (wantPulse)
+            if (wantMode != TEST_OFF)
             {
-                s->pulse.reset();
+                s->testRestart = true;
 
-                // Movement gating is bypassed in pulse mode: release a block that is in force
+                // Movement gating is bypassed in the test modes: release a block that is in force
                 if (! s->pluginEnabled)
                 {
                     s->pluginEnabled = true;
                     addEvent (s->createEvent (s->movementOutputChannel, firstSampleInBlock, false), 0);
                 }
-                LOGC ("Stream ", streamId, ": pulse test mode");
+                LOGC ("Stream ", streamId, wantMode == TEST_PULSE ? ": pulse test mode" : ": periodic test mode");
             }
-            else
+            else if (wasTest)
             {
                 // The ripple baseline predates the test; estimate it again
                 s->calibrate = true;
@@ -1045,10 +1049,10 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             }
         }
 
-        if (s->pulseModeActive)
+        if (s->testModeActive != TEST_OFF)
         {
-            const float* pulseData = buffer.getReadPointer (s->rippleInputChannel, 0);
-            processPulses (streamId, pulseData, numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
+            const float* data = buffer.getReadPointer (s->rippleInputChannel, 0);
+            processTestTrigger (streamId, data, numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
             s->latency.expire (firstSampleInBlock + numSamplesInBlock);
             continue;
         }
@@ -1112,6 +1116,8 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             }
         }
     }
+
+    relayOnsets();
 }
 
 void RippleDetector::processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut)
@@ -1213,19 +1219,38 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, c
         std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
 }
 
-void RippleDetector::processPulses (uint16 streamId, const float* data, int numSamples, int64 firstSample,
-                                   float* featureOut, float* thresholdOut, float* eventOut)
+void RippleDetector::processTestTrigger (uint16 streamId, const float* data, int numSamples, int64 firstSample,
+                                        float* featureOut, float* thresholdOut, float* eventOut)
 {
     RippleDetectorSettings* s = settings[streamId];
-    const float threshold = (float) s->pulse.getParams().thresholdUv;
+    const bool periodicMode = s->testModeActive == TEST_PERIODIC;
 
-    // flagScratch receives the detector's per-sample lockout state (1 or 0), turned into flags below
+    if (s->testRestart)
+    {
+        s->testRestart = false;
+        s->pulse.reset();
+        s->periodic.reset();
+    }
+
+    // Pulse (test): the detector finds the pulses on the channel. Periodic: the schedule gives the
+    // onsets and the channel's crossings are not used.
     s->pulseEvents.clear();
-    s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data(), s->flagScratch.data());
-    for (int i = 0; i < numSamples; i++)
-        s->flagScratch[(size_t) i] = s->flagScratch[(size_t) i] != 0 ? FeatureFifo::LOCKOUT : 0;
+    if (periodicMode)
+    {
+        s->externalOnsets.clear();
+        s->periodic.onsets (numSamples, s->externalOnsets);
+        s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data(), nullptr, &s->externalOnsets);
+    }
+    else
+    {
+        s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data());
+    }
 
-    // Drive the outputs from the events, and mark the TTL line per sample
+    const float threshold = (float) s->pulse.getParams().thresholdUv;
+    const float eventLevel = periodicMode ? TEST_EVENT_LEVEL : threshold;
+
+    // Drive the outputs, and mark the output TTL for the viewer
+    std::fill (s->flagScratch.begin(), s->flagScratch.begin() + numSamples, (uint8_t) 0);
     bool high = s->rippleTtlHigh;
     int cursor = 0;
 
@@ -1236,58 +1261,50 @@ void RippleDetector::processPulses (uint16 streamId, const float* data, int numS
             for (int k = cursor; k < to; k++)
                 s->flagScratch[(size_t) k] |= FeatureFifo::TTL_HIGH;
             if (eventOut != nullptr)
-                FloatVectorOperations::fill (eventOut + cursor, threshold, to - cursor);
+                FloatVectorOperations::fill (eventOut + cursor, eventLevel, to - cursor);
         }
         cursor = std::max (cursor, to);
     };
-
-    const bool measureResponse = s->pulse.getParams().responseThresholdUv > 0.0;
 
     for (const auto& ev : s->pulseEvents)
     {
         markUntil (ev.sampleIndex);
 
-        switch (ev.type)
+        if (ev.type == PulseEdgeDetector::Event::Onset)
         {
-            case PulseEdgeDetector::Event::Onset:
-            {
-                setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
-                s->pulseDetections++;
+            setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+            s->flagScratch[(size_t) ev.sampleIndex] |= FeatureFifo::TTL_ONSET;
 
-                // Event time: the pulse's first sample above threshold; decision: the confirming sample
-                const int64 edge = firstSample + ev.sampleIndex - ev.edgeOffset;
-                s->latency.onsetEmitted (edge, firstSample + ev.sampleIndex);
-                if (measureResponse)
-                    s->responseLatency.onsetEmitted (edge, firstSample + ev.sampleIndex);
-                high = true;
-                break;
-            }
-            case PulseEdgeDetector::Event::TtlOff:
-                if (high)
-                {
-                    setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
-                    high = false;
-                }
-                break;
-            case PulseEdgeDetector::Event::Response:
-            {
-                // The artefact's first sample; it may have started in the previous block
-                s->responseLatency.hardwareEdge (firstSample + ev.sampleIndex - ev.edgeOffset);
-                s->flagScratch[(size_t) std::max (0, ev.sampleIndex - ev.edgeOffset)] |= FeatureFifo::RESPONSE;
-                break;
-            }
+            // Event time: the pulse's first sample above threshold (the scheduled sample in Periodic);
+            // decision: the sample that confirmed it
+            s->latency.onsetEmitted (firstSample + ev.sampleIndex - ev.edgeOffset, firstSample + ev.sampleIndex);
+            high = true;
+        }
+        else if (high)
+        {
+            setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+            high = false;
         }
     }
     markUntil (numSamples);
-    s->responseLatency.expire (firstSample + numSamples);
 
+    s->testTriggered = s->pulse.getDetections();
+    s->testIgnored = s->pulse.getIgnoredExternal();
+    s->periodicSent = s->periodic.getSent();
+
+    // Feature channels: the level and threshold in Pulse; only the output TTL in Periodic
     if (featureOut != nullptr)
-        std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
+    {
+        if (periodicMode)
+            FloatVectorOperations::clear (featureOut, numSamples);
+        else
+            std::copy (s->featureScratch.begin(), s->featureScratch.begin() + numSamples, featureOut);
+    }
     if (thresholdOut != nullptr)
-        FloatVectorOperations::fill (thresholdOut, threshold, numSamples);
+        FloatVectorOperations::fill (thresholdOut, periodicMode ? 0.0f : threshold, numSamples);
 
-    // Viewer: level in multiples of the threshold (the threshold line sits at 1), raw channel, no noise channel
-    const float scale = threshold > 0.0f ? 1.0f / threshold : 0.0f;
+    // Viewer: in Pulse, the level in multiples of the threshold (the threshold line sits at 1)
+    const float scale = ! periodicMode && threshold > 0.0f ? 1.0f / threshold : 0.0f;
     for (int i = 0; i < numSamples; i++)
         s->zScratch[(size_t) i] = s->featureScratch[(size_t) i] * scale;
     std::fill (s->noiseFeatureScratch.begin(), s->noiseFeatureScratch.begin() + numSamples, 0.0f);
@@ -1298,6 +1315,34 @@ void RippleDetector::processPulses (uint16 streamId, const float* data, int numS
     src[FeatureFifo::RAW] = data;
     src[FeatureFifo::NOISE_RAW] = s->noiseFeatureScratch.data();
     s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
+}
+
+void RippleDetector::relayOnsets()
+{
+    // An onset on one stream (e.g. a File Reader's) can trigger a stimulus whose TTL returns on
+    // another stream (the acquisition board's digital input). Streams run on separate clocks, so
+    // the onset is registered on each other stream with a Stim. Input line at the newest sample
+    // that stream had when the trigger was sent: its latency then runs from the moment of sending.
+    for (const uint16 source : firedStreams)
+    {
+        for (auto stream : getDataStreams())
+        {
+            const uint16 id = stream->getStreamId();
+            RippleDetectorSettings* s = settings[id];
+            if (id == source || s->stimInputLine < 0)
+                continue;
+
+            const int64 now = getFirstSampleNumberForBlock (id) + (int64) getNumSamplesInBlock (id);
+            s->latency.onsetEmitted (now, now);
+        }
+    }
+
+    // Streams that are not processed (e.g. disabled here) still age their pending onsets
+    for (auto stream : getDataStreams())
+    {
+        const uint16 id = stream->getStreamId();
+        settings[id]->latency.expire (getFirstSampleNumberForBlock (id) + (int64) getNumSamplesInBlock (id));
+    }
 }
 
 void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples)
@@ -1339,7 +1384,11 @@ void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex,
 
     // Requested first: it is the latency path to the stimulus
     if (state)
+    {
         laserTrigger.fire();
+        if (firedStreams.size() < firedStreams.capacity())
+            firedStreams.push_back (streamId);
+    }
 
     addEvent (s->createEvent (s->rippleOutputChannel, firstSample + sampleIndex, state), sampleIndex);
     s->rippleTtlHigh = state;
