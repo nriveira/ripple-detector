@@ -99,6 +99,17 @@ void testResetAndReconfigure()
     check (later == std::vector<int64_t> ({ 60000, 120000, 180000 }),
            "shorter interval mid-sequence: next onset 2 s after the change, then every 2 s (" + str (later) + ")");
 
+    // start(): the first onset at once, then every interval, and start() again restarts the count
+    PeriodicSchedule st;
+    st.configure (FS, 3, 1.0);
+    st.reset();
+    run (st, 15000, 1024); // idle half a second: nothing due yet
+    st.start();
+    const auto started = run (st, 5 * 30000, 1024);
+    check (started == std::vector<int64_t> ({ 0, 30000, 60000 }), "start(): the first onset at once (" + str (started) + ")");
+    st.start();
+    check (! st.isDone() && st.getSent() == 0, "start() again: the count restarts");
+
     // Raising the count after the sequence finished sends the extra onsets
     PeriodicSchedule u;
     u.configure (FS, 1, 1.0);

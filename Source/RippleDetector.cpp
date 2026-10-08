@@ -33,19 +33,23 @@ void RippleDetector::registerParameters()
     // selector shows positions). The placeholder lists are replaced by the channel names in
     // updateSettings(); they only need to be long enough for a saved choice to survive loading
     // a configuration. setChannelChoices() keeps each choice on the same channel name.
+    // Ripple Input's first entry is "None": nothing is detected on the stream (e.g. a headstage IMU
+    // stream, or a stream used only for Periodic (test)). It is saved as "ripple_input"; the earlier
+    // "ripple_channel" had no "None", so its saved positions would now point one channel too early.
     {
-        Array<String> choices;
+        Array<String> choices { "None" };
         for (int i = 1; i <= MAX_NOISE_CHOICES; i++)
             choices.add (String (i));
 
         addCategoricalParameter (
             Parameter::STREAM_SCOPE,
-            "ripple_channel",
+            "ripple_input",
             "Ripple Input",
-            "Continuous input channel on which ripples are detected, by channel name (in the test modes it is only shown). \
-Defaults to the stream's first channel.",
+            "Continuous input channel on which ripples are detected, by channel name (in Pulse (test), the channel carrying \
+the test pulses). Defaults to the stream's first channel. None: nothing is detected on this stream (no TTL, no laser \
+trigger); Periodic (test) still runs.",
             choices,
-            0);
+            1);
     }
 
     // The noise channel's first entry is "None" (the default): a channel selector would pre-select
@@ -92,8 +96,8 @@ controller), excluding the headstage-to-board and stimulator latencies.",
         "Detect",
         "Ripple: detect sharp-wave ripples (normal use). Pulse (test): detect the leading edge of square test pulses on the \
 Ripple Input channel (from a File Reader recording, or played into saline) and respond exactly as to a ripple (Ripple Output \
-TTL, laser trigger, stimulation latency). Periodic (test): respond Pulses times, Interval seconds apart, ignoring the \
-continuous signal, for repeated tests of the stimulation. The test modes bypass the noise veto and movement gating, and \
+TTL, laser trigger, stimulation latency). Periodic (test): after START, respond Pulses times, Interval seconds apart, \
+ignoring the continuous signal, for repeated tests of the stimulation. The test modes bypass the noise veto and movement gating, and \
 switching back to Ripple recalibrates the stream.",
         { "Ripple", "Pulse (test)", "Periodic (test)" },
         0);
@@ -285,7 +289,7 @@ with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's
         "the channel(s) to use for movement detection (one channel for EMG, up to three for ACC)",
         3);
 
-    // Movement data can come from another stream, e.g. the headstage IMU's. Both lists are filled in
+    // Movement data can come from another stream, e.g. the headstage IMU's. The list is filled in
     // updateSettings(); the placeholders only need to be long enough for a saved choice to load.
     {
         Array<String> streams { "This stream" };
@@ -301,18 +305,14 @@ the headstage IMU's when it is present (choose them with Mov. Axes). Another str
             streams,
             0);
 
-        Array<String> axes;
-        for (int i = 1; i <= MAX_NOISE_CHOICES; i++)
-            axes.add (String (i));
-
-        addCategoricalParameter (
+        // Chosen in the editor's Mov. Axes pop-up, saved by channel name
+        addStringParameter (
             Parameter::STREAM_SCOPE,
-            "mov_axes",
+            "mov_channels",
             "Mov. Axes",
-            "Movement channels from the Mov. Source stream: an x/y/z group (for ACC, the magnitude of the vector) or a single \
-channel (for EMG).",
-            axes,
-            0);
+            "Movement channels from the Mov. Source stream, by name, separated by commas: for ACC, the magnitude of their \
+vector; for EMG, a single channel. They are shown in the viewer's movement panel whether or not Mov. Detect is on.",
+            "");
     }
 
     addTtlLineParameter (
@@ -407,9 +407,9 @@ void RippleDetector::updateSettings()
             addFeatureChannels (getDataStream (streamId));
 
         // The channel drop-downs list the stream's own channel names
-        setChannelChoices (stream, "ripple_channel", false);
+        setChannelChoices (stream, "ripple_input", true);
         setChannelChoices (stream, "noise_channel", true);
-        parameterValueChanged (stream->getParameter ("ripple_channel"));
+        parameterValueChanged (stream->getParameter ("ripple_input"));
         parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
 
@@ -520,70 +520,55 @@ void RippleDetector::setMovementSourceChoices (const DataStream* stream)
     setChoicesKeepingName (sourceParam, sources, true);
     const int chosen = sourceParam->getSelectedIndex();
     s->movSourceStreamId = isPositiveAndBelow (chosen, sourceIds.size()) ? sourceIds[chosen] : 0;
-
-    // Mov. Axes: the chosen stream's x/y/z groups (e.g. IMU_A_ACC_X/Y/Z), then its single channels
-    Array<String> axes;
-    s->movAxesChannels.clear();
-
-    if (const DataStream* source = s->movSourceStreamId != 0 ? getDataStream (s->movSourceStreamId) : nullptr)
-    {
-        const auto channels = source->getContinuousChannels();
-
-        for (auto* x : channels)
-        {
-            const String name = x->getName();
-            if (! name.endsWith ("_X"))
-                continue;
-
-            const String prefix = name.dropLastCharacters (2);
-            const ContinuousChannel* y = nullptr;
-            const ContinuousChannel* z = nullptr;
-            for (auto* c : channels)
-            {
-                if (c->getName() == prefix + "_Y")
-                    y = c;
-                else if (c->getName() == prefix + "_Z")
-                    z = c;
-            }
-
-            if (y != nullptr && z != nullptr)
-            {
-                axes.add (prefix + "_X/Y/Z");
-                s->movAxesChannels.push_back ({ x->getGlobalIndex(), y->getGlobalIndex(), z->getGlobalIndex() });
-            }
-        }
-
-        for (auto* c : channels)
-        {
-            axes.add (c->getName());
-            s->movAxesChannels.push_back ({ c->getGlobalIndex() });
-        }
-    }
-
-    // Without another stream, leave the list as it is (Mov. Axes is hidden then). Shrinking it here
-    // would lose a saved choice: while a configuration loads, the GUI runs this update before it
-    // applies the saved values, and it rejects a saved index beyond the current list.
-    if (axes.isEmpty())
-        return;
-
-    setChoicesKeepingName ((CategoricalParameter*) stream->getParameter ("mov_axes"), axes, false);
 }
 
 void RippleDetector::updateMovementChannels (uint16 streamId)
 {
     RippleDetectorSettings* s = settings[streamId];
+    const DataStream* stream = getDataStream (streamId);
+    if (stream == nullptr)
+        return;
 
-    if (s->movSourceStreamId == 0)
+    std::vector<int> channels;
+    StringArray names;
+    const DataStream* source = s->movSourceStreamId != 0 ? getDataStream (s->movSourceStreamId) : nullptr;
+
+    if (source == nullptr)
     {
-        s->movementChannels = s->movInputChannels;
+        channels = s->movInputChannels;
+        for (auto* c : stream->getContinuousChannels())
+            if (std::find (channels.begin(), channels.end(), c->getGlobalIndex()) != channels.end())
+                names.add (c->getName());
     }
     else
     {
-        const int choice = ((CategoricalParameter*) getDataStream (streamId)->getParameter ("mov_axes"))->getSelectedIndex();
-        s->movementChannels = isPositiveAndBelow (choice, (int) s->movAxesChannels.size()) ? s->movAxesChannels[(size_t) choice]
-                                                                                            : std::vector<int>();
+        // Mov. Axes, by name, in the source stream's channel order. A saved name the stream does not
+        // have (e.g. the IMU is absent today) is kept in the parameter but not used.
+        const StringArray wanted = getMovementAxes (streamId);
+        for (auto* c : source->getContinuousChannels())
+            if (wanted.contains (c->getName()))
+            {
+                channels.push_back (c->getGlobalIndex());
+                names.add (c->getName());
+            }
     }
 
+    const float rate = source != nullptr ? source->getSampleRate() : stream->getSampleRate();
+    const int decimation = std::max (1, (int) std::ceil (rate / MovementFifo::MAX_RATE));
+
+    {
+        // The audio thread reads these under the same lock (process())
+        const SpinLock::ScopedLockType lock (s->movLock);
+        s->movementChannels = std::move (channels);
+        s->movDecimation = decimation;
+        s->movDecimCount = 0;
+        s->movDecimSum.fill (0.0);
+        s->movFifo.setCapacity ((int) (rate / (float) decimation * VIEWER_FIFO_SECONDS));
+    }
+
+    s->movViewNames = names;
+    s->movViewRate = rate / (float) decimation;
+    s->movViewVersion++;
     s->movChannChanged = true;
 }
 
@@ -660,6 +645,14 @@ double RippleDetector::getBaselineStd (uint16 streamId)
     return settings[streamId]->method->getBaselineStd();
 }
 
+bool RippleDetector::hasRippleInput (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return false;
+
+    return settings[streamId]->rippleInputChannel >= 0;
+}
+
 bool RippleDetector::hasNoiseChannel (uint16 streamId)
 {
     if (streamId == 0 || getDataStream (streamId) == nullptr)
@@ -708,6 +701,119 @@ RippleDetector::TestStats RippleDetector::getTestStats (uint16 streamId)
     const RippleDetectorSettings* s = settings[streamId];
     return { s->testTriggered.load(), s->periodicSent.load(), s->pulseParams.thresholdUv, s->pulseParams.lockoutMs,
              s->periodicCount, s->periodicIntervalS };
+}
+
+void RippleDetector::setPeriodicRunning (uint16 streamId, bool run)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return;
+
+    settings[streamId]->periodicRun = run;
+}
+
+bool RippleDetector::isPeriodicRunning (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return false;
+
+    return settings[streamId]->periodicRun;
+}
+
+int RippleDetector::applyPeriodicMessage (const String& msg)
+{
+    StringArray words;
+    words.addTokens (msg.trim().toUpperCase(), " ", "");
+    words.removeEmptyStrings();
+    if (words.size() != 2 || words[0] != "PERIODIC" || (words[1] != "START" && words[1] != "STOP"))
+        return -1;
+
+    // Acquisition start leaves the sequence stopped, so a START only means something while acquiring
+    if (words[1] == "START" && ! CoreServices::getAcquisitionStatus())
+        return 0;
+
+    int streams = 0;
+    for (auto stream : getDataStreams())
+    {
+        RippleDetectorSettings* s = settings[stream->getStreamId()];
+        if (s->testModeRequested == TEST_PERIODIC)
+        {
+            s->periodicRun = words[1] == "START";
+            streams++;
+        }
+    }
+    return streams;
+}
+
+String RippleDetector::handleConfigMessage (const String& msg)
+{
+    const int streams = applyPeriodicMessage (msg);
+    if (streams < 0)
+        return "Unknown message; use PERIODIC START or PERIODIC STOP";
+
+    const bool start = msg.containsIgnoreCase ("START");
+    if (start && ! CoreServices::getAcquisitionStatus())
+        return "Not acquiring: start acquisition first, then PERIODIC START";
+
+    return "Periodic (test) " + String (start ? "started" : "stopped") + " on " + String (streams)
+           + " stream(s) in Periodic (test) mode";
+}
+
+void RippleDetector::handleBroadcastMessage (const String& msg, const int64)
+{
+    applyPeriodicMessage (msg);
+}
+
+RippleDetector::MovementView RippleDetector::getMovementView (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return {};
+
+    const RippleDetectorSettings* s = settings[streamId];
+    const DataStream* source = s->movSourceStreamId != 0 ? getDataStream (s->movSourceStreamId) : getDataStream (streamId);
+    return { s->movViewNames, s->movViewRate, s->movViewVersion.load(), source != nullptr ? source->getName() : String(),
+             s->movSwitchEnabled };
+}
+
+MovementFifo* RippleDetector::getMovementFifo (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return nullptr;
+
+    return &settings[streamId]->movFifo;
+}
+
+StringArray RippleDetector::getMovementSourceChannelNames (uint16 streamId)
+{
+    StringArray names;
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return names;
+
+    if (const DataStream* source = getDataStream (settings[streamId]->movSourceStreamId))
+        for (auto* c : source->getContinuousChannels())
+            names.add (c->getName());
+
+    return names;
+}
+
+StringArray RippleDetector::getMovementAxes (uint16 streamId)
+{
+    StringArray names;
+    if (const DataStream* stream = getDataStream (streamId))
+        if (auto* p = stream->getParameter ("mov_channels"))
+        {
+            names.addTokens (p->getValueAsString(), AXES_SEPARATOR, "");
+            names.trim();
+            names.removeEmptyStrings();
+        }
+
+    return names;
+}
+
+void RippleDetector::setMovementAxes (uint16 streamId, const StringArray& names)
+{
+    if (const DataStream* stream = getDataStream (streamId))
+        if (auto* p = stream->getParameter ("mov_channels"))
+            p->setNextValue (names.joinIntoString (AXES_SEPARATOR));
 }
 
 FeatureFifo* RippleDetector::getFeatureFifo (uint16 streamId)
@@ -814,6 +920,8 @@ bool RippleDetector::startAcquisition()
         s->testTriggered = 0;
         s->testIgnored = 0;
         s->periodicSent = 0;
+        s->periodicRun = false; // Periodic waits for START
+        s->periodicActive = false;
         s->latency.reset (stream->getSampleRate(), (int64) (stream->getSampleRate() * LATENCY_TIMEOUT_SECONDS));
     }
 
@@ -883,21 +991,26 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     uint16 streamId = param->getStreamId();
     RippleDetectorSettings* s = settings[streamId];
 
-    if (paramName.equalsIgnoreCase ("ripple_channel"))
+    if (paramName.equalsIgnoreCase ("ripple_input"))
     {
-        // Entry i is the stream's channel i; a stream without channels has none to choose
+        // Entry 0 is "None"; entry i is the stream's channel i - 1
         const int choice = ((CategoricalParameter*) param)->getSelectedIndex();
         const auto channels = getDataStream (streamId)->getContinuousChannels();
+        const int channel = choice > 0 && choice <= channels.size() ? channels[choice - 1]->getGlobalIndex() : -1;
 
-        if (choice >= 0 && choice < channels.size())
-            s->rippleInputChannel = channels[choice]->getGlobalIndex();
-        else
-            s->rippleInputChannel = -1;
+        if (channel != s->rippleInputChannel)
+        {
+            // A new channel needs its own baseline
+            s->rippleInputChannel = channel;
+            s->calibrate = true;
+        }
+        refreshEditor();
     }
     else if (paramName.equalsIgnoreCase ("detect_mode"))
     {
-        // Picked up by the audio thread at its next block (process())
+        // Picked up by the audio thread at its next block (process()). Periodic waits for START.
         s->testModeRequested = jlimit (0, 2, ((CategoricalParameter*) param)->getSelectedIndex());
+        s->periodicRun = false;
         refreshEditor();
     }
     else if (paramName.equalsIgnoreCase ("pulse_thresh"))
@@ -1012,7 +1125,7 @@ void RippleDetector::parameterValueChanged (Parameter* param)
                 s->movSwitch = "OFF";
                 ((CategoricalParameter*) param)->setNextValue ("OFF");
                 msg += "Movement detection via acceleration magnitude requires at least one input channel. ";
-                msg += "Choose up to 3 channels with Mov. Input, or an x/y/z group with Mov. Axes for another stream. ";
+                msg += "Choose up to 3 channels with Mov. Input, or the axes with Mov. Axes for another stream. ";
                 msg += "Switching to OFF until then.";
                 showAlertLater (AlertWindow::WarningIcon, "WARNING", msg);
             }
@@ -1022,7 +1135,7 @@ void RippleDetector::parameterValueChanged (Parameter* param)
                 msg += movementChannelCount > 1 ? " channels " : " channel ";
                 msg += "currently selected for movement detection via acceleration magnitude (ACC)";
                 msg += "\n\n";
-                msg += "You may use up to 3 channels to compute the acceleration magnitude \n\n";
+                msg += "Mov. Input takes up to 3 channels; Mov. Axes (another stream) takes any number \n\n";
                 msg += "Use Mov. Input (or Mov. Axes for another stream) to change them.";
                 showAlertLater (AlertWindow::InfoIcon, "INFO", msg);
             }
@@ -1068,7 +1181,7 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     }
     else if (paramName.equalsIgnoreCase ("mov_source"))
     {
-        // The axes list follows the chosen stream (in updateSettings() this is done afterwards)
+        // The axes are looked up in the chosen stream (in updateSettings() this is done afterwards)
         if (! updatingSettings)
         {
             setMovementSourceChoices (getDataStream (streamId));
@@ -1076,10 +1189,13 @@ void RippleDetector::parameterValueChanged (Parameter* param)
             refreshEditor();
         }
     }
-    else if (paramName.equalsIgnoreCase ("mov_axes"))
+    else if (paramName.equalsIgnoreCase ("mov_channels"))
     {
         if (! updatingSettings)
+        {
             updateMovementChannels (streamId);
+            refreshEditor();
+        }
     }
     else if (paramName.equalsIgnoreCase ("mov_out"))
     {
@@ -1139,7 +1255,7 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             FloatVectorOperations::clear (eventOut, numSamplesInBlock);
         }
 
-        if (s->rippleInputChannel < 0 || s->method == nullptr || numSamplesInBlock == 0)
+        if (s->method == nullptr || numSamplesInBlock == 0)
             continue;
 
         if (s->paramsDirty.exchange (false))
@@ -1155,7 +1271,17 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->zScratch.resize ((size_t) numSamplesInBlock);
             s->flagScratch.resize ((size_t) numSamplesInBlock);
             s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
+            s->silentScratch.assign ((size_t) numSamplesInBlock, 0.0f);
         }
+
+        // Ripple Input None: nothing to detect on (Periodic still runs)
+        const float* rippleData = s->rippleInputChannel >= 0 ? buffer.getReadPointer (s->rippleInputChannel, 0) : nullptr;
+
+        // The movement channels may be swapped by the message thread (updateMovementChannels); skip a
+        // block rather than wait if that is happening right now
+        const SpinLock::ScopedTryLockType movLock (s->movLock);
+        if (movLock.isLocked())
+            publishMovement (streamId, buffer);
 
         // Switching between ripple detection and the test modes
         const int wantMode = s->testModeRequested.load();
@@ -1202,8 +1328,17 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
 
         if (s->testModeActive != TEST_OFF)
         {
-            const float* data = buffer.getReadPointer (s->rippleInputChannel, 0);
+            const float* data = rippleData != nullptr ? rippleData : s->silentScratch.data();
             processTestTrigger (streamId, data, numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
+            s->latency.expire (firstSampleInBlock + numSamplesInBlock);
+            continue;
+        }
+
+        if (rippleData == nullptr)
+        {
+            if (s->rippleTtlHigh)
+                setRippleTtl (streamId, false, 0, firstSampleInBlock);
+            publishSilence (streamId, numSamplesInBlock);
             s->latency.expire (firstSampleInBlock + numSamplesInBlock);
             continue;
         }
@@ -1237,10 +1372,9 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         }
 
         // Movement gating is evaluated first so that it applies to this block's ripple events
-        if (s->movSwitchEnabled)
+        if (s->movSwitchEnabled && movLock.isLocked())
             processMovement (streamId, buffer, numSamplesInBlock, firstSampleInBlock);
 
-        const float* rippleData = buffer.getReadPointer (s->rippleInputChannel, 0);
         const float* noiseData = s->noiseInputChannel >= 0 ? buffer.getReadPointer (s->noiseInputChannel, 0) : nullptr;
         processRipples (streamId, rippleData, noiseData, numSamplesInBlock, firstSampleInBlock, featureOut, eventOut);
         s->latency.expire (firstSampleInBlock + numSamplesInBlock);
@@ -1388,8 +1522,33 @@ void RippleDetector::processTestTrigger (uint16 streamId, const float* data, int
     s->pulseEvents.clear();
     if (periodicMode)
     {
+        // START / STOP. A start begins afresh: the line low, no lockout from an earlier run
+        const bool run = s->periodicRun.load();
+        if (run && ! s->periodicActive)
+        {
+            if (s->rippleTtlHigh)
+                setRippleTtl (streamId, false, 0, firstSample);
+            s->pulse.reset();
+            s->periodic.start();
+            s->periodicActive = true;
+        }
+        else if (! run)
+        {
+            s->periodicActive = false;
+        }
+
         s->externalOnsets.clear();
-        s->periodic.onsets (numSamples, s->externalOnsets);
+        if (s->periodicActive)
+        {
+            s->periodic.onsets (numSamples, s->externalOnsets);
+
+            // The last response is on its way: the sequence is over (START runs it again)
+            if (s->periodic.isDone())
+            {
+                s->periodicActive = false;
+                s->periodicRun = false;
+            }
+        }
         s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data(), nullptr, &s->externalOnsets);
     }
     else
@@ -1526,6 +1685,63 @@ void RippleDetector::publishFeatures (uint16 streamId, const float* rippleData, 
     src[FeatureFifo::RAW] = rippleData;
     // Without a noise channel the scratch buffer is all zeros, which stands in for its raw trace
     src[FeatureFifo::NOISE_RAW] = noiseData != nullptr ? noiseData : s->noiseFeatureScratch.data();
+    s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
+}
+
+void RippleDetector::publishMovement (uint16 streamId, AudioBuffer<float>& buffer)
+{
+    RippleDetectorSettings* s = settings[streamId];
+
+    const int numTraces = std::min ((int) s->movementChannels.size(), MovementFifo::MAX_TRACES);
+    if (numTraces == 0)
+        return;
+
+    // The channels may belong to another stream (e.g. the headstage IMU's) with its own block length
+    const uint16 sourceId = s->movSourceStreamId != 0 ? s->movSourceStreamId : streamId;
+    const int sourceSamples = (int) getNumSamplesInBlock (sourceId);
+    if (sourceSamples <= 0)
+        return;
+
+    // Block means of movDecimation samples, carried over between blocks
+    int produced = 0;
+    for (int t = 0; t < numTraces; t++)
+        if ((int) s->movViewScratch[(size_t) t].size() < sourceSamples)
+            s->movViewScratch[(size_t) t].resize ((size_t) sourceSamples);
+
+    for (int i = 0; i < sourceSamples; i++)
+    {
+        for (int t = 0; t < numTraces; t++)
+            s->movDecimSum[(size_t) t] += buffer.getSample (s->movementChannels[(size_t) t], i);
+
+        if (++s->movDecimCount >= s->movDecimation)
+        {
+            for (int t = 0; t < numTraces; t++)
+            {
+                s->movViewScratch[(size_t) t][(size_t) produced] = (float) (s->movDecimSum[(size_t) t] / s->movDecimCount);
+                s->movDecimSum[(size_t) t] = 0.0;
+            }
+            s->movDecimCount = 0;
+            produced++;
+        }
+    }
+
+    if (produced == 0)
+        return;
+
+    const float* src[MovementFifo::MAX_TRACES];
+    for (int t = 0; t < numTraces; t++)
+        src[t] = s->movViewScratch[(size_t) t].data();
+    s->movFifo.write (src, numTraces, produced);
+}
+
+void RippleDetector::publishSilence (uint16 streamId, int numSamples)
+{
+    RippleDetectorSettings* s = settings[streamId];
+
+    std::fill (s->flagScratch.begin(), s->flagScratch.begin() + numSamples, (uint8_t) 0);
+
+    std::array<const float*, FeatureFifo::NUM_FEATURES> src;
+    src.fill (s->silentScratch.data());
     s->viewerFifo.write (src, s->flagScratch.data(), numSamples);
 }
 

@@ -16,6 +16,8 @@
     Shows, for the stream selected in the editor, the ripple channel as it enters the
     detector and, below it, the z-scored RMS feature together with the detection
     threshold, detected events, the movement-blocked state and the calibration progress.
+    When movement channels are chosen (e.g. the headstage IMU's axes), they are drawn in a
+    movement panel, each in its own lane and scaled to its own range.
     With a noise channel selected, its RMS is drawn against its own baseline and vetoed
     onsets are marked. The detection parameters of the stream can be edited from the
     panel on the right.
@@ -83,12 +85,32 @@ private:
         const Bin* fromNewest (size_t age) const;
     };
 
+    /** The movement channels of one stream, at their own (decimated) rate */
+    struct MovementDisplay
+    {
+        std::vector<std::vector<float>> traces; // one ring per trace
+        size_t head { 0 };
+        size_t count { 0 };
+        float rate { 0.0f };
+        uint32_t version { 0 };
+        StringArray names;
+        String sourceName;
+        bool gating { false };
+
+        void reset (const RippleDetector::MovementView& view);
+        void push (const float* const* values, int numTraces, int numSamples);
+        float fromNewest (int trace, size_t age) const;
+    };
+
     uint16 currentStreamId() const;
 
     /** Drains the processor queues of every stream into the display rings */
     void pullData (bool discard);
 
     void drawPlot (Graphics& g);
+
+    /** Draws the movement channels of the stream into 'area' */
+    void drawMovement (Graphics& g, Rectangle<int> area, const MovementDisplay& display, int windowSeconds);
 
     /** Draws the ripple channel's raw trace into 'area' */
     /** Draws one channel as recorded (feature RAW or NOISE_RAW), shaded by the flags in 'shadeFlags' */
@@ -103,6 +125,7 @@ private:
 
     RippleDetector* processor;
     std::map<uint16, StreamDisplay> displays;
+    std::map<uint16, MovementDisplay> movDisplays;
 
     std::unique_ptr<Label> streamLabel;
     std::unique_ptr<Label> rangeLabel;

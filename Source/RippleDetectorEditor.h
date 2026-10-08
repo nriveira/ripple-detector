@@ -31,12 +31,23 @@ public:
     /** Text for a calibrate button given the stream's calibration state */
     static String calibrateButtonText (RippleDetector* processor, uint16 streamId, bool acquiring);
 
+    /** The calibrate buttons double as Periodic (test)'s START / STOP: sets a button's label, state and tooltip */
+    static void updateCalibrateButton (UtilityButton& button, RippleDetector* processor, uint16 streamId, bool acquiring);
+
+    /** A calibrate button was pressed: calibrates, or starts / stops Periodic (test) */
+    static void calibrateButtonPressed (RippleDetector* processor, uint16 streamId);
+
 private:
     RippleDetector* rippleDetector;
 
     std::unique_ptr<UtilityButton> calibrateButton;
     std::unique_ptr<ToggleButton> featureToggle;
     std::unique_ptr<UtilityButton> laserTestButton;
+
+    // Mov. Axes: several channels of another stream (e.g. the headstage IMU's), chosen in a pop-up
+    std::unique_ptr<Label> movAxesLabel;
+    std::unique_ptr<UtilityButton> movAxesButton;
+    void showMovementAxesPopup();
 
     /** Polls the laser TEST request and shows its outcome on the button */
     class LaserTestPoller : public Timer

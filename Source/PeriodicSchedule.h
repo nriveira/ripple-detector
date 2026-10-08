@@ -7,8 +7,8 @@
 #include <vector>
 
 /**
-    The periodic test mode's timer: count onsets, intervalS apart, the first one
-    interval after reset(). The onsets are handed to the pulse detector as external
+    The periodic test mode's timer: count onsets, intervalS apart, the first one at
+    start() (the START button), or one interval after reset(). The onsets are handed to the pulse detector as external
     onsets, so each one gets the same response as a detected pulse (Ripple Output
     TTL, laser trigger, stimulation latency) while the continuous signal is ignored.
 
@@ -32,6 +32,13 @@ public:
         sampleCount = 0;
         sent = 0;
         next = interval;
+    }
+
+    /** Restarts the sequence with its first onset at the next block's first sample */
+    void start()
+    {
+        reset();
+        next = 0;
     }
 
     /** Appends the block-relative samples of this block's onsets to 'out' */

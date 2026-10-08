@@ -22,6 +22,11 @@ const Colour EVENT_COLOUR (0x40, 0xd0, 0x70);
 const Colour BLOCKED_COLOUR (0xff, 0x90, 0x20);
 const Colour CALIBRATING_COLOUR (0x90, 0x90, 0x90);
 const Colour PULSE_MODE_COLOUR (0xff, 0xc0, 0x30); // pulse test mode banner
+const Colour MOVEMENT_COLOURS[] = { Colour (0xff, 0x70, 0x70), Colour (0x70, 0xe0, 0x70), Colour (0x70, 0xa0, 0xff),
+                                    Colour (0xff, 0xc0, 0x40), Colour (0xd0, 0x80, 0xff), Colour (0x40, 0xd8, 0xd8) };
+const float MOVEMENT_LANE_FRACTION = 0.05f; // share of the plot height per movement trace
+const float MOVEMENT_MIN_FRACTION = 0.14f;
+const float MOVEMENT_MAX_FRACTION = 0.36f;
 
 
 /** Rounds a step to 1, 2 or 5 times a power of ten */
@@ -93,6 +98,43 @@ const RippleDetectorCanvas::Bin* RippleDetectorCanvas::StreamDisplay::fromNewest
 
     const size_t index = (head + bins.size() - 1 - age) % bins.size();
     return &bins[index];
+}
+
+// ---------------------------------------------------------------- MovementDisplay
+
+void RippleDetectorCanvas::MovementDisplay::reset (const RippleDetector::MovementView& view)
+{
+    names = view.names;
+    rate = view.rate;
+    version = view.version;
+    sourceName = view.sourceName;
+    gating = view.gating;
+
+    const size_t capacity = (size_t) std::max (1.0f, rate * (float) HISTORY_SECONDS);
+    traces.assign ((size_t) std::min (names.size(), MovementFifo::MAX_TRACES), std::vector<float> (capacity, 0.0f));
+    head = 0;
+    count = 0;
+}
+
+void RippleDetectorCanvas::MovementDisplay::push (const float* const* values, int numTraces, int numSamples)
+{
+    if (traces.empty())
+        return;
+
+    const size_t capacity = traces[0].size();
+    for (int i = 0; i < numSamples; i++)
+    {
+        for (int t = 0; t < std::min (numTraces, (int) traces.size()); t++)
+            traces[(size_t) t][head] = values[t][i];
+        head = (head + 1) % capacity;
+        count = std::min (count + 1, capacity);
+    }
+}
+
+float RippleDetectorCanvas::MovementDisplay::fromNewest (int trace, size_t age) const
+{
+    const auto& ring = traces[(size_t) trace];
+    return ring[(head + ring.size() - 1 - age) % ring.size()];
 }
 
 // ---------------------------------------------------------------- Canvas
@@ -227,15 +269,9 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     const bool acquiring = processor->getEditor() != nullptr && processor->getEditor()->acquisitionIsActive;
     const bool calibrating = acquiring && processor->isCalibrating (streamId);
 
-    calibrateButton->setLabel (RippleDetectorEditor::calibrateButtonText (processor, streamId, acquiring));
-    calibrateButton->setEnabledState (! calibrating);
-
+    // Calibrates in Ripple mode; START / STOP in Periodic (test)
+    RippleDetectorEditor::updateCalibrateButton (*calibrateButton, processor, streamId, acquiring);
     const int testMode = processor->getTestMode (streamId);
-    if (testMode != RippleDetector::TEST_OFF)
-    {
-        calibrateButton->setLabel ("CALIBRATE");
-        calibrateButton->setEnabledState (false); // nothing to calibrate in the test modes
-    }
 
     // Stimulation latency and laser lines, shown in every mode
     auto latencyAndLaserText = [this, streamId]()
@@ -289,6 +325,10 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     {
         text = "";
     }
+    else if (testMode == RippleDetector::TEST_OFF && ! processor->hasRippleInput (streamId))
+    {
+        text = "Ripple Input is None: nothing is detected on this stream.";
+    }
     else if (testMode == RippleDetector::TEST_PULSE)
     {
         const auto ts = processor->getTestStats (streamId);
@@ -299,8 +339,10 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     else if (testMode == RippleDetector::TEST_PERIODIC)
     {
         const auto ts = processor->getTestStats (streamId);
-        text = "Periodic test mode: " + String ((int) ts.periodicSent) + " of " + String (ts.periodicCount) + " sent,\nevery "
-               + String (ts.periodicIntervalS, 1) + " s from the start of acquisition";
+        const bool running = processor->isPeriodicRunning (streamId);
+        text = "Periodic test mode: " + String ((int) ts.periodicSent) + " of " + String (ts.periodicCount) + " sent, every "
+               + String (ts.periodicIntervalS, 1) + " s.\n"
+               + (running ? "Running; STOP ends it." : acquiring ? "Stopped; START sends the first at once." : "START once acquiring.");
         text += latencyAndLaserText();
     }
     else if (calibrating)
@@ -417,6 +459,28 @@ void RippleDetectorCanvas::pullData (bool discard)
 
                         display.accumulate (values, fifo->getFlags (start), size);
                     });
+
+        // Movement channels: start afresh whenever they change
+        if (MovementFifo* movFifo = processor->getMovementFifo (streamId))
+        {
+            MovementDisplay& md = movDisplays[streamId];
+            const auto view = processor->getMovementView (streamId);
+            if (md.version != view.version || md.traces.empty() != view.names.isEmpty())
+                md.reset (view);
+            md.gating = view.gating;
+
+            const int numTraces = (int) md.traces.size();
+            movFifo->read ([&] (int start, int size)
+                           {
+                               if (discard || numTraces == 0)
+                                   return;
+
+                               const float* values[MovementFifo::MAX_TRACES];
+                               for (int t = 0; t < numTraces; t++)
+                                   values[t] = movFifo->getValues (t, start);
+                               md.push (values, numTraces, size);
+                           });
+        }
     }
 }
 
@@ -572,6 +636,125 @@ void RippleDetectorCanvas::drawRaw (Graphics& g, Rectangle<int> area, const Stre
     g.drawText (title, plot.getX() + 8, plot.getY() + 4, 320, 18, Justification::centredLeft);
 }
 
+void RippleDetectorCanvas::drawMovement (Graphics& g, Rectangle<int> area, const MovementDisplay& display, int windowSeconds)
+{
+    const int axisLeft = 44;
+    Rectangle<int> plot = area.withTrimmedLeft (axisLeft);
+    if (plot.getWidth() <= 0 || plot.getHeight() <= 0)
+        return;
+
+    g.setColour (findColour (ThemeColours::windowBackground));
+    g.fillRect (plot);
+
+    const int numTraces = (int) display.traces.size();
+    const size_t windowSamples = (size_t) std::max (1.0f, display.rate * (float) windowSeconds);
+    const size_t shown = std::min (windowSamples, display.count);
+    const int w = plot.getWidth();
+    const float laneHeight = (float) plot.getHeight() / (float) numTraces;
+
+    g.setFont (FontOptions ("Inter", "Regular", 11.0f));
+
+    for (int t = 0; t < numTraces; t++)
+    {
+        const Colour colour = MOVEMENT_COLOURS[t % (int) (sizeof (MOVEMENT_COLOURS) / sizeof (MOVEMENT_COLOURS[0]))];
+        const float laneTop = (float) plot.getY() + laneHeight * (float) t;
+
+        if (t > 0)
+        {
+            g.setColour (findColour (ThemeColours::outline).withAlpha (0.3f));
+            g.drawHorizontalLine ((int) laneTop, (float) plot.getX(), (float) plot.getRight());
+        }
+
+        // Each trace in its own lane, scaled to its range over the window (the units differ: g, deg/s, ...)
+        float lo = FLT_MAX, hi = -FLT_MAX;
+        for (size_t age = 0; age < shown; age++)
+        {
+            const float v = display.fromNewest (t, age);
+            lo = std::min (lo, v);
+            hi = std::max (hi, v);
+        }
+
+        if (shown > 0)
+        {
+            const float span = hi - lo > 1e-9f ? hi - lo : 1.0f;
+            const float mid = 0.5f * (hi + lo);
+            auto yFor = [&] (float v)
+            {
+                const float u = hi - lo > 1e-9f ? (v - lo) / span : 0.5f + (v - mid);
+                return laneTop + laneHeight - 2.0f - u * (laneHeight - 4.0f);
+            };
+
+            // The newest sample at the right edge; one min/max span per pixel column, joined to the previous column
+            g.setColour (colour);
+            float previous = 0.0f;
+            bool havePrevious = false;
+            for (int px = 0; px < w; px++)
+            {
+                // Ages covered by this column (oldest on the left)
+                const double a0 = (double) (w - px) * (double) windowSamples / (double) w;
+                const double a1 = (double) (w - px - 1) * (double) windowSamples / (double) w;
+                size_t ageHi = (size_t) a0;
+                const size_t ageLo = (size_t) a1;
+                if (ageLo >= shown)
+                    continue;
+                ageHi = std::min (std::max (ageHi, ageLo + 1), shown);
+
+                float mn = FLT_MAX, mx = -FLT_MAX;
+                for (size_t age = ageLo; age < ageHi; age++)
+                {
+                    const float v = display.fromNewest (t, age);
+                    mn = std::min (mn, v);
+                    mx = std::max (mx, v);
+                }
+                if (havePrevious)
+                {
+                    mn = std::min (mn, previous);
+                    mx = std::max (mx, previous);
+                }
+                previous = display.fromNewest (t, ageLo);
+                havePrevious = true;
+
+                const float yTop = yFor (mx);
+                g.drawVerticalLine (plot.getX() + px, yTop, std::max (yFor (mn), yTop + 1.0f));
+            }
+        }
+
+        // Name on the left, range on the right, each on the plot background so the trace does not hide it
+        const int textHeight = (int) std::min (laneHeight, 14.0f);
+        auto label = [&] (const String& text, int x, Justification justification)
+        {
+            // Measured text would create JUCE objects in this plugin that the GUI's JUCE frees, which
+            // trips its leak detector; ~6 px per character of 11 px Inter is close enough for a box
+            const int width = 6 * text.length() + 8;
+            Rectangle<int> box (justification == Justification::centredLeft ? x : x - width, (int) laneTop + 1, width, textHeight);
+            g.setColour (findColour (ThemeColours::windowBackground).withAlpha (0.85f));
+            g.fillRect (box);
+            g.setColour (colour);
+            g.drawText (text, box, Justification::centred);
+        };
+        label (display.names[t], plot.getX() + 2, Justification::centredLeft);
+        if (shown > 0)
+            label (String (lo, 2) + " .. " + String (hi, 2), plot.getRight() - 2, Justification::centredRight);
+    }
+
+    g.setColour (findColour (ThemeColours::outline));
+    g.drawRect (plot);
+
+    // Title, at the left of the axis column
+    g.setColour (findColour (ThemeColours::defaultText));
+    g.setFont (FontOptions ("Inter", "Regular", 11.0f));
+    g.drawFittedText ("Mov.", area.getX(), plot.getY(), axisLeft - 6, 16, Justification::centredRight, 1);
+    g.setFont (FontOptions ("Inter", "Regular", 10.0f));
+    g.drawFittedText (display.gating ? "gating" : "view", area.getX(), plot.getY() + 14, axisLeft - 6, 14,
+                      Justification::centredRight, 1);
+
+    if (display.count == 0)
+    {
+        g.setFont (FontOptions ("Inter", "Regular", 12.0f));
+        g.drawText ("Movement (" + display.sourceName + "): no data yet", plot, Justification::centred);
+    }
+}
+
 void RippleDetectorCanvas::drawPlot (Graphics& g)
 {
     const int windowSeconds = windowCombo->getSelectedId();
@@ -590,7 +773,9 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
 
     const int rawHeight = (int) ((float) plotArea.getHeight() * (hasNoise ? RAW_FRACTION_WITH_NOISE : RAW_FRACTION));
     drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::RAW,
-             (pulseMode ? "Test pulse channel (" : "Ripple channel (") + uv + ")", RAW_COLOUR,
+             processor->hasRippleInput (streamId) ? (pulseMode ? "Test pulse channel (" : "Ripple channel (") + uv + ")"
+                                                  : String ("Ripple Input: None"),
+             RAW_COLOUR,
              FeatureFifo::TTL_HIGH | FeatureFifo::TTL_ONSET | FeatureFifo::VETOED);
     area.removeFromTop (8);
 
@@ -598,6 +783,15 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     {
         drawRaw (g, area.removeFromTop (rawHeight), display, numBins, FeatureFifo::NOISE_RAW,
                  "Noise channel (" + uv + ")", NOISE_COLOUR, FeatureFifo::NOISE | FeatureFifo::VETOED);
+        area.removeFromTop (8);
+    }
+
+    auto mit = movDisplays.find (streamId);
+    if (mit != movDisplays.end() && ! mit->second.traces.empty())
+    {
+        const float fraction = jlimit (MOVEMENT_MIN_FRACTION, MOVEMENT_MAX_FRACTION,
+                                       MOVEMENT_LANE_FRACTION * (float) mit->second.traces.size());
+        drawMovement (g, area.removeFromTop ((int) ((float) plotArea.getHeight() * fraction)), mit->second, windowSeconds);
         area.removeFromTop (8);
     }
 
@@ -799,7 +993,7 @@ void RippleDetectorCanvas::comboBoxChanged (ComboBox*)
 void RippleDetectorCanvas::buttonClicked (Button* button)
 {
     if (button == calibrateButton.get())
-        processor->shouldCalibrate = true;
+        RippleDetectorEditor::calibrateButtonPressed (processor, currentStreamId());
 }
 
 void RippleDetectorCanvas::saveCustomParametersToXml (XmlElement* xml)

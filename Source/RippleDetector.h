@@ -40,7 +40,8 @@ public:
     std::vector<uint8_t> flagScratch; // Per-sample status flags for the block
     FeatureFifo viewerFifo; // Hands features to the viewer
 
-    int rippleInputChannel { -1 }; // Global index of the ripple input channel
+    int rippleInputChannel { -1 }; // Global index of the ripple input channel, -1 for None (nothing is detected)
+    std::vector<float> silentScratch; // zeros standing in for the ripple channel when it is None
 
     // --- Noise channel veto ---
     int noiseInputChannel { -1 }; // Global index of the noise channel, -1 if none
@@ -78,6 +79,8 @@ public:
     std::atomic<uint32_t> testTriggered { 0 }; // responses this run
     std::atomic<uint32_t> testIgnored { 0 }; // pulses ignored in the lockout this run (detected pulses re-arm, so mostly 0)
     std::atomic<uint32_t> periodicSent { 0 };
+    std::atomic<bool> periodicRun { false }; // Periodic: START pressed and the sequence not finished (message thread sets it)
+    bool periodicActive { false }; // audio thread: the schedule is running
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
@@ -90,10 +93,20 @@ public:
     String movSwitch { "OFF" }; // Movement detection mode (OFF / ACC / EMG)
     bool movSwitchEnabled { false }; // Movement gating is enabled
     bool movChannChanged { false }; // User selected new EMG/ACC channels
-    std::vector<int> movementChannels; // Global indices of the channels used for movement detection
+    std::vector<int> movementChannels; // Global indices of the channels used for movement detection (guarded by movLock)
+    SpinLock movLock; // the message thread swaps movementChannels while the audio thread may be reading them
     uint16 movSourceStreamId { 0 }; // "mov_source": the stream the movement channels come from (0 = this stream)
     std::vector<int> movInputChannels; // "mov_input" (this stream), global indices
-    std::vector<std::vector<int>> movAxesChannels; // per "mov_axes" entry: global indices in the source stream
+
+    // --- Movement view (the viewer's movement panel; shown whether or not movement gating is on) ---
+    MovementFifo movFifo;
+    StringArray movViewNames; // names of the traces in movFifo (message thread)
+    float movViewRate { 0.0f }; // their rate after decimation, Hz (message thread)
+    std::atomic<uint32_t> movViewVersion { 0 }; // changes whenever the traces change, so the viewer starts afresh
+    int movDecimation { 1 }; // source samples per viewer sample
+    int movDecimCount { 0 }; // audio thread: samples summed so far for the next viewer sample
+    std::array<double, MovementFifo::MAX_TRACES> movDecimSum {};
+    std::array<std::vector<float>, MovementFifo::MAX_TRACES> movViewScratch;
     int movementOutputChannel { 0 }; // Output TTL line for the movement-blocked state
     double movSds { 5.0 }; // SDs above the mean for the EMG/ACC threshold
     int minTimeWoMov { 5000 }; // Minimum immobility (ms) before detection is enabled again
@@ -157,6 +170,9 @@ public:
     double getBaselineMean (uint16 streamId);
     double getBaselineStd (uint16 streamId);
 
+    /** False when the stream's Ripple Input is None */
+    bool hasRippleInput (uint16 streamId);
+
     /** True if the stream has a noise channel selected */
     bool hasNoiseChannel (uint16 streamId);
 
@@ -170,6 +186,11 @@ public:
     /** Digital input line of the stimulus trigger (-1 if none), and the latency measured against it this run */
     int getStimInputLine (uint16 streamId);
     StimLatencyMeter::Stats getLatencyStats (uint16 streamId);
+
+    /** "PERIODIC START" / "PERIODIC STOP": the START / STOP button for every stream in Periodic (test),
+        e.g. from a script through the HTTP API (PUT /api/processors/<id>/config or /api/message) */
+    String handleConfigMessage (const String& msg) override;
+    void handleBroadcastMessage (const String& msg, const int64 systemTimeMillis) override;
 
     /** Pairs the stimulus controller's hardware trigger with the ripple onsets */
     void handleTTLEvent (TTLEventPtr event) override;
@@ -197,6 +218,31 @@ public:
 
     /** The test modes' settings and counts for a stream */
     TestStats getTestStats (uint16 streamId);
+
+    /** Periodic (test): START / STOP. A started sequence sends its first response at once and stops by itself
+        after Pulses responses; it never starts on its own (acquisition start and mode switches leave it stopped). */
+    void setPeriodicRunning (uint16 streamId, bool run);
+    bool isPeriodicRunning (uint16 streamId);
+
+    /** The movement panel's traces for a stream: their names (empty if none), rate and version */
+    struct MovementView
+    {
+        StringArray names;
+        float rate { 0.0f };
+        uint32_t version { 0 };
+        String sourceName; // the stream they come from
+        bool gating { false }; // Mov. Detect is on, so they also block ripple detection
+    };
+    MovementView getMovementView (uint16 streamId);
+    MovementFifo* getMovementFifo (uint16 streamId);
+
+    /** The movement channels the Mov. Axes pop-up offers (the Mov. Source stream's), and the chosen names */
+    StringArray getMovementSourceChannelNames (uint16 streamId);
+    StringArray getMovementAxes (uint16 streamId);
+    void setMovementAxes (uint16 streamId, const StringArray& names);
+
+    /** Separator of the names in "mov_channels" */
+    static constexpr const char* AXES_SEPARATOR = ",";
 
     /** Returns the viewer queue for a stream, or nullptr if the stream is unknown */
     FeatureFifo* getFeatureFifo (uint16 streamId);
@@ -243,11 +289,20 @@ private:
     /** Replaces a drop-down's entries, keeping the chosen entry by name (entry 0 stays put if it is a fixed choice) */
     static void setChoicesKeepingName (CategoricalParameter* param, const Array<String>& choices, bool firstIsFixed);
 
-    /** Fills "mov_source" with the other streams' names and "mov_axes" with the chosen stream's channels */
+    /** Fills "mov_source" with the other streams' names */
     void setMovementSourceChoices (const DataStream* stream);
 
-    /** Sets movementChannels from Mov. Input (this stream) or Mov. Axes (another stream) */
+    /** Sets movementChannels from Mov. Input (this stream) or Mov. Axes (another stream), and the movement view */
     void updateMovementChannels (uint16 streamId);
+
+    /** Hands the block's movement channels, decimated, to the viewer's movement panel */
+    void publishMovement (uint16 streamId, AudioBuffer<float>& buffer);
+
+    /** Applies a PERIODIC START / STOP message; returns how many streams it reached, or -1 if it is not one */
+    int applyPeriodicMessage (const String& msg);
+
+    /** Fills the viewer queue with silence and no flags (Ripple Input None) */
+    void publishSilence (uint16 streamId, int numSamples);
 
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);

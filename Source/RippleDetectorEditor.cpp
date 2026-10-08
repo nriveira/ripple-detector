@@ -13,6 +13,114 @@ static const String CALIBRATE_TOOLTIP =
     "while calibrating. Calibration runs automatically when acquisition starts and when the movement channels change; "
     "press to run it again, e.g. after moving the electrode or changing the filter.";
 
+static const String PERIODIC_TOOLTIP =
+    "START sends the first response at once, then one every Interval until Pulses have been sent; STOP ends the "
+    "sequence early. Available while acquiring.";
+
+namespace
+{
+/**
+    Pop-up for Mov. Axes: a toggle per channel of the Mov. Source stream, and a button per x/y/z group
+    (e.g. IMU_A_ACC) that selects or clears the group. Every change is handed back at once.
+*/
+class MovementAxesSelector : public Component
+{
+public:
+    MovementAxesSelector (const StringArray& channels, const StringArray& chosen, std::function<void (const StringArray&)> onChange_)
+        : onChange (std::move (onChange_))
+    {
+        // x/y/z groups
+        for (const auto& name : channels)
+        {
+            if (! name.endsWith ("_X"))
+                continue;
+            const String prefix = name.dropLastCharacters (2);
+            if (channels.contains (prefix + "_Y") && channels.contains (prefix + "_Z"))
+            {
+                auto* b = groupButtons.add (new TextButton (prefix));
+                b->setTooltip ("Select or clear " + prefix + "_X, _Y and _Z");
+                b->onClick = [this, prefix] { toggleGroup (prefix); };
+                content.addAndMakeVisible (b);
+            }
+        }
+
+        for (const auto& name : channels)
+        {
+            auto* t = toggles.add (new ToggleButton (name));
+            t->setToggleState (chosen.contains (name), dontSendNotification);
+            t->onClick = [this] { changed(); };
+            content.addAndMakeVisible (t);
+        }
+
+        clearButton.onClick = [this]
+        {
+            for (auto* t : toggles)
+                t->setToggleState (false, dontSendNotification);
+            changed();
+        };
+        content.addAndMakeVisible (clearButton);
+
+        // Lay out the content, then size the pop-up to it (scrolling if it is tall)
+        const int groupRows = (groupButtons.size() + 2) / 3;
+        const int rows = (toggles.size() + 1) / 2;
+        const int width = 2 * COLUMN_WIDTH + 16;
+        int y = 8;
+        for (int i = 0; i < groupButtons.size(); i++)
+            groupButtons[i]->setBounds (8 + (i % 3) * (width - 16) / 3, y + (i / 3) * 26, (width - 16) / 3 - 4, 22);
+        y += groupRows * 26 + (groupRows > 0 ? 6 : 0);
+        for (int i = 0; i < toggles.size(); i++)
+            toggles[i]->setBounds (8 + (i % 2) * COLUMN_WIDTH, y + (i / 2) * 22, COLUMN_WIDTH - 4, 20);
+        y += rows * 22 + 6;
+        clearButton.setBounds (8, y, 70, 22);
+        content.setSize (width, y + 30);
+
+        viewport.setViewedComponent (&content, false);
+        viewport.setScrollBarsShown (true, false);
+        addAndMakeVisible (viewport);
+        setSize (width + viewport.getScrollBarThickness(), std::min (content.getHeight(), 420));
+    }
+
+    void resized() override { viewport.setBounds (getLocalBounds()); }
+
+private:
+    static constexpr int COLUMN_WIDTH = 160;
+
+    void toggleGroup (const String& prefix)
+    {
+        // All three on unless all three already are
+        bool allOn = true;
+        for (auto* t : toggles)
+            if (isInGroup (t->getButtonText(), prefix))
+                allOn = allOn && t->getToggleState();
+        for (auto* t : toggles)
+            if (isInGroup (t->getButtonText(), prefix))
+                t->setToggleState (! allOn, dontSendNotification);
+        changed();
+    }
+
+    static bool isInGroup (const String& name, const String& prefix)
+    {
+        return name == prefix + "_X" || name == prefix + "_Y" || name == prefix + "_Z";
+    }
+
+    void changed()
+    {
+        StringArray chosen;
+        for (auto* t : toggles)
+            if (t->getToggleState())
+                chosen.add (t->getButtonText());
+        onChange (chosen);
+    }
+
+    std::function<void (const StringArray&)> onChange;
+    OwnedArray<TextButton> groupButtons;
+    OwnedArray<ToggleButton> toggles;
+    TextButton clearButton { "Clear" };
+    Component content;
+    Viewport viewport;
+};
+} // namespace
+
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     : VisualizerEditor (parentNode, "Ripple Detector", 693)
@@ -22,8 +130,8 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     /* Column 1: channels and calibration */
     int col1 = 10;
 
-    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "ripple_channel", col1, 22);
-    ParameterEditor* rippleInput = getParameterEditor ("ripple_channel");
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "ripple_input", col1, 22);
+    ParameterEditor* rippleInput = getParameterEditor ("ripple_input");
     rippleInput->setLayout (ParameterEditor::Layout::nameOnTop);
     rippleInput->setSize (80, 34);
 
@@ -147,10 +255,20 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movInput->setLayout (ParameterEditor::Layout::nameOnTop);
     movInput->setSize (90, 34);
 
-    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_axes", col4, 92);
-    ParameterEditor* movAxes = getParameterEditor ("mov_axes");
-    movAxes->setLayout (ParameterEditor::Layout::nameOnTop);
-    movAxes->setSize (90, 34);
+    movAxesLabel = std::make_unique<Label> ("MovAxesLabel", "Mov. Axes");
+    movAxesLabel->setFont (FontOptions ("Inter", "Regular", 13.0f));
+    movAxesLabel->setBorderSize (BorderSize<int> (0));
+    movAxesLabel->setBounds (col4, 92, 90, 15);
+    addChildComponent (movAxesLabel.get());
+
+    movAxesButton = std::make_unique<UtilityButton> ("None");
+    movAxesButton->addListener (this);
+    movAxesButton->setRadius (3.0f);
+    movAxesButton->setTooltip ("Movement channels from the Mov. Source stream, e.g. the headstage IMU's axes: any number for ACC "
+                               "(the magnitude of their vector), one for EMG. They are shown in the viewer's movement panel "
+                               "whether or not Mov. Detect is on.");
+    movAxesButton->setBounds (col4, 108, 90, 18);
+    addChildComponent (movAxesButton.get());
 
     // The movement output TTL sits with the other TTL lines
     addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Mov_Out", colNoise, 92);
@@ -202,12 +320,66 @@ String RippleDetectorEditor::calibrateButtonText (RippleDetector* processor, uin
     return "CALIBRATE";
 }
 
+void RippleDetectorEditor::updateCalibrateButton (UtilityButton& button, RippleDetector* processor, uint16 streamId, bool acquiring)
+{
+    const int testMode = processor->getTestMode (streamId);
+
+    if (testMode == RippleDetector::TEST_PERIODIC)
+    {
+        button.setLabel (processor->isPeriodicRunning (streamId) ? "STOP" : "START");
+        button.setEnabledState (acquiring);
+        button.setTooltip (PERIODIC_TOOLTIP);
+    }
+    else if (testMode == RippleDetector::TEST_PULSE)
+    {
+        button.setLabel ("CALIBRATE");
+        button.setEnabledState (false); // nothing to calibrate
+        button.setTooltip (CALIBRATE_TOOLTIP);
+    }
+    else
+    {
+        button.setLabel (calibrateButtonText (processor, streamId, acquiring));
+        button.setEnabledState (! (acquiring && processor->isCalibrating (streamId)));
+        button.setTooltip (CALIBRATE_TOOLTIP);
+    }
+}
+
+void RippleDetectorEditor::calibrateButtonPressed (RippleDetector* processor, uint16 streamId)
+{
+    if (processor->getTestMode (streamId) == RippleDetector::TEST_PERIODIC)
+        processor->setPeriodicRunning (streamId, ! processor->isPeriodicRunning (streamId));
+    else
+        processor->shouldCalibrate = true;
+}
+
+void RippleDetectorEditor::showMovementAxesPopup()
+{
+    const uint16 streamId = getCurrentStream();
+    const StringArray channels = rippleDetector->getMovementSourceChannelNames (streamId);
+    if (channels.isEmpty())
+        return;
+
+    Component::SafePointer<RippleDetectorEditor> safeThis (this);
+    auto selector = std::make_unique<MovementAxesSelector> (channels, rippleDetector->getMovementAxes (streamId),
+                                                            [safeThis, streamId] (const StringArray& chosen)
+                                                            {
+                                                                if (safeThis != nullptr)
+                                                                    safeThis->rippleDetector->setMovementAxes (streamId, chosen);
+                                                            });
+
+    CallOutBox::launchAsynchronously (std::move (selector), movAxesButton->getScreenBounds(), nullptr);
+}
+
 void RippleDetectorEditor::buttonClicked (Button* button)
 {
     if (button == calibrateButton.get())
     {
-        rippleDetector->shouldCalibrate = true;
+        calibrateButtonPressed (rippleDetector, getCurrentStream());
         timerCallback();
+    }
+    else if (button == movAxesButton.get())
+    {
+        showMovementAxesPopup();
     }
     else if (button == laserTestButton.get())
     {
@@ -299,20 +471,14 @@ void RippleDetectorEditor::stopAcquisition()
 {
     stopTimer();
     featureToggle->setEnabled (true);
-    calibrateButton->setLabel ("CALIBRATE");
-    calibrateButton->setEnabledState (true);
     disable();
+    // acquisitionIsActive only turns false after this returns
+    updateCalibrateButton (*calibrateButton, rippleDetector, getCurrentStream(), false);
 }
 
 void RippleDetectorEditor::timerCallback()
 {
-    const uint16 streamId = getCurrentStream();
-    const bool calibrating = acquisitionIsActive && rippleDetector->isCalibrating (streamId);
-    const bool pulse = rippleDetector->isTestMode (streamId);
-
-    // The test modes have no baseline to calibrate
-    calibrateButton->setLabel (pulse ? String ("CALIBRATE") : calibrateButtonText (rippleDetector, streamId, acquisitionIsActive));
-    calibrateButton->setEnabledState (! calibrating && ! pulse);
+    updateCalibrateButton (*calibrateButton, rippleDetector, getCurrentStream(), acquisitionIsActive);
 }
 
 // Called when settings are updated
@@ -376,7 +542,7 @@ void RippleDetectorEditor::updateMethodView()
             ed->setVisible (movement);
 
     // The channel drop-downs' entries are the stream's channel names, set in the processor's updateSettings()
-    for (auto* name : { "ripple_channel", "noise_channel", "mov_source", "mov_axes" })
+    for (auto* name : { "ripple_input", "noise_channel", "mov_source" })
         if (auto* ed = getParameterEditor (name))
             ed->updateView();
 
@@ -388,8 +554,21 @@ void RippleDetectorEditor::updateMethodView()
 
     if (auto* ed = getParameterEditor ("Mov_Input"))
         ed->setVisible (! otherSource);
-    if (auto* ed = getParameterEditor ("mov_axes"))
-        ed->setVisible (otherSource);
+    movAxesLabel->setVisible (otherSource);
+    movAxesButton->setVisible (otherSource);
+
+    const StringArray axes = rippleDetector->getMovementAxes (getCurrentStream());
+    const StringArray available = rippleDetector->getMovementSourceChannelNames (getCurrentStream());
+    int found = 0;
+    for (const auto& a : axes)
+        found += available.contains (a) ? 1 : 0;
+    movAxesButton->setLabel (axes.isEmpty() ? String ("None")
+                             : axes.size() == 1 ? axes[0]
+                                                : String (axes.size()) + " axes");
+    // Saved axes the stream does not have (e.g. another headstage today) are kept but unused
+    movAxesButton->setEnabledState (! available.isEmpty());
+    if (found < axes.size())
+        movAxesButton->setLabel (String (found) + " of " + String (axes.size()));
 
     // Feature output toggle reflects the selected stream
     bool featureOut = false;

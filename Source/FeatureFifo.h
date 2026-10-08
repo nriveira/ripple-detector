@@ -92,4 +92,64 @@ private:
     std::vector<uint8_t> flags;
 };
 
+/**
+    Single-producer / single-consumer queue for the viewer's movement panel: up to MAX_TRACES
+    movement channels (e.g. the headstage IMU's axes) at their own stream's rate, decimated to at
+    most MAX_RATE. Samples that arrive while the queue is full are dropped.
+*/
+class MovementFifo
+{
+public:
+    static constexpr int MAX_TRACES = 12;
+    static constexpr float MAX_RATE = 1000.0f; // Hz
+
+    MovementFifo() : fifo (1) {}
+
+    void setCapacity (int samples)
+    {
+        const int capacity = std::max (256, samples);
+        fifo.setTotalSize (capacity);
+        for (auto& v : values)
+            v.assign ((size_t) capacity, 0.0f);
+    }
+
+    /** Called from the audio thread; traces beyond the queue's MAX_TRACES are not shown */
+    void write (const float* const* src, int numTraces, int numSamples)
+    {
+        int start1, size1, start2, size2;
+        fifo.prepareToWrite (numSamples, start1, size1, start2, size2);
+
+        for (int t = 0; t < std::min (numTraces, MAX_TRACES); t++)
+        {
+            if (size1 > 0)
+                std::copy (src[t], src[t] + size1, values[(size_t) t].begin() + start1);
+            if (size2 > 0)
+                std::copy (src[t] + size1, src[t] + size1 + size2, values[(size_t) t].begin() + start2);
+        }
+
+        fifo.finishedWrite (size1 + size2);
+    }
+
+    /** Called from the message thread. The callback receives contiguous regions. */
+    template <typename Callback>
+    void read (Callback&& callback)
+    {
+        int start1, size1, start2, size2;
+        fifo.prepareToRead (fifo.getNumReady(), start1, size1, start2, size2);
+
+        if (size1 > 0)
+            callback (start1, size1);
+        if (size2 > 0)
+            callback (start2, size2);
+
+        fifo.finishedRead (size1 + size2);
+    }
+
+    const float* getValues (int trace, int index) const { return values[(size_t) trace].data() + index; }
+
+private:
+    AbstractFifo fifo;
+    std::array<std::vector<float>, MAX_TRACES> values;
+};
+
 #endif
