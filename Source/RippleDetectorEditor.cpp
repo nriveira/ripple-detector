@@ -135,15 +135,28 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movDetect->setLayout (ParameterEditor::Layout::nameOnTop);
     movDetect->setSize (90, 34);
 
-    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Mov_Input", col4, 57);
+    // Where the movement channels come from: this stream, or another one such as the headstage IMU's
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_source", col4, 57);
+    ParameterEditor* movSource = getParameterEditor ("mov_source");
+    movSource->setLayout (ParameterEditor::Layout::nameOnTop);
+    movSource->setSize (90, 34);
+
+    // Mov. Input (this stream) and Mov. Axes (another stream) share a place; updateMethodView shows one
+    addSelectedChannelsParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Mov_Input", col4, 92);
     ParameterEditor* movInput = getParameterEditor ("Mov_Input");
     movInput->setLayout (ParameterEditor::Layout::nameOnTop);
     movInput->setSize (90, 34);
 
-    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Mov_Out", col4, 92);
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_axes", col4, 92);
+    ParameterEditor* movAxes = getParameterEditor ("mov_axes");
+    movAxes->setLayout (ParameterEditor::Layout::nameOnTop);
+    movAxes->setSize (90, 34);
+
+    // The movement output TTL sits with the other TTL lines
+    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "Mov_Out", colNoise, 92);
     ParameterEditor* movOut = getParameterEditor ("Mov_Out");
     movOut->setLayout (ParameterEditor::Layout::nameOnTop);
-    movOut->setSize (90, 34);
+    movOut->setSize (80, 34);
 
     int col5 = 500;
 
@@ -363,9 +376,20 @@ void RippleDetectorEditor::updateMethodView()
             ed->setVisible (movement);
 
     // The channel drop-downs' entries are the stream's channel names, set in the processor's updateSettings()
-    for (auto* name : { "ripple_channel", "noise_channel" })
+    for (auto* name : { "ripple_channel", "noise_channel", "mov_source", "mov_axes" })
         if (auto* ed = getParameterEditor (name))
             ed->updateView();
+
+    // Mov. Input for this stream's channels, Mov. Axes for another stream's
+    bool otherSource = false;
+    if (auto* stream = rippleDetector->getDataStream (getCurrentStream()))
+        if (auto* p = stream->getParameter ("mov_source"))
+            otherSource = ((CategoricalParameter*) p)->getSelectedIndex() > 0;
+
+    if (auto* ed = getParameterEditor ("Mov_Input"))
+        ed->setVisible (! otherSource);
+    if (auto* ed = getParameterEditor ("mov_axes"))
+        ed->setVisible (otherSource);
 
     // Feature output toggle reflects the selected stream
     bool featureOut = false;

@@ -91,6 +91,9 @@ public:
     bool movSwitchEnabled { false }; // Movement gating is enabled
     bool movChannChanged { false }; // User selected new EMG/ACC channels
     std::vector<int> movementChannels; // Global indices of the channels used for movement detection
+    uint16 movSourceStreamId { 0 }; // "mov_source": the stream the movement channels come from (0 = this stream)
+    std::vector<int> movInputChannels; // "mov_input" (this stream), global indices
+    std::vector<std::vector<int>> movAxesChannels; // per "mov_axes" entry: global indices in the source stream
     int movementOutputChannel { 0 }; // Output TTL line for the movement-blocked state
     double movSds { 5.0 }; // SDs above the mean for the EMG/ACC threshold
     int minTimeWoMov { 5000 }; // Minimum immobility (ms) before detection is enabled again
@@ -237,6 +240,15 @@ private:
         names, optionally after "None", keeping the chosen channel by name */
     void setChannelChoices (const DataStream* stream, const String& paramName, bool withNone);
 
+    /** Replaces a drop-down's entries, keeping the chosen entry by name (entry 0 stays put if it is a fixed choice) */
+    static void setChoicesKeepingName (CategoricalParameter* param, const Array<String>& choices, bool firstIsFixed);
+
+    /** Fills "mov_source" with the other streams' names and "mov_axes" with the chosen stream's channels */
+    void setMovementSourceChoices (const DataStream* stream);
+
+    /** Sets movementChannels from Mov. Input (this stream) or Mov. Axes (another stream) */
+    void updateMovementChannels (uint16 streamId);
+
     /** Adds the derived feature / threshold channels to a stream */
     void addFeatureChannels (DataStream* stream);
 
@@ -262,7 +274,7 @@ private:
     /** Logs the baseline statistics after calibration */
     void logCalibration (uint16 streamId);
 
-    void evalMovement (uint16 streamId, int64 firstSample);
+    void evalMovement (uint16 streamId, int64 firstSample, int numSamples);
 
     static double calculateRms (const float* data, int initIndex, int endIndex);
 
