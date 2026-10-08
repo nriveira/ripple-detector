@@ -4,7 +4,7 @@ project(ripple-detector-tests CXX)
 # Standalone tests for the detection methods, the laser trigger request and the latency
 # measurement. These do not need the Open Ephys GUI:
 #
-#   cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests
+#   cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests && ./Tests/build/trigger_lockout_tests
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,3 +40,7 @@ add_test(NAME pulse_edge_tests COMMAND pulse_edge_tests)
 add_executable(periodic_schedule_tests PeriodicScheduleTests.cpp)
 target_include_directories(periodic_schedule_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../Source)
 add_test(NAME periodic_schedule_tests COMMAND periodic_schedule_tests)
+
+add_executable(trigger_lockout_tests TriggerLockoutTests.cpp)
+target_include_directories(trigger_lockout_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../Source)
+add_test(NAME trigger_lockout_tests COMMAND trigger_lockout_tests)

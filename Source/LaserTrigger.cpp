@@ -72,10 +72,14 @@ bool LaserTrigger::configure (const String& host, int port, Transport transport)
     return valid;
 }
 
-void LaserTrigger::fire()
+bool LaserTrigger::fire()
 {
     if (! isActive())
-        return;
+        return false;
+
+    // One stimulus per event: a re-detection of the stimulus's own artefact must not fire it again
+    if (! lockout_.allow (Time::getHighResolutionTicks()))
+        return false;
 
     requested_++;
 
@@ -91,6 +95,8 @@ void LaserTrigger::fire()
     {
         wake.signal();
     }
+
+    return true;
 }
 
 bool LaserTrigger::test()
@@ -110,6 +116,7 @@ LaserTrigger::Stats LaserTrigger::getStats() const
     const uint32_t fired = fired_;
 
     return { requested,
+             lockout_.getSuppressed(),
              fired,
              busy_,
              rejected_,

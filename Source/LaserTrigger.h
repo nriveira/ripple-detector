@@ -7,6 +7,7 @@
 
 #include "LaserTriggerHttp.h"
 #include "LaserTriggerUdp.h"
+#include "TriggerLockout.h"
 
 /**
     Fires the laser through the LaserDriver Pi on every ripple onset, over
@@ -60,8 +61,12 @@ public:
 
     Transport getTransport() const { return transport_; }
 
-    /** Fires one trigger. Audio-thread safe: no allocation and no blocking I/O. */
-    void fire();
+    /** Fires one trigger, unless sending is off or the stimulation lockout from the last trigger has not
+        passed. Returns true if it was sent. Audio-thread safe: no allocation and no blocking I/O. */
+    bool fire();
+
+    /** After a trigger, further fire() calls are dropped for this long (0: none), whichever stream they come from */
+    void setLockoutMs (double ms) { lockout_.setLockout ((int64_t) (ms / 1000.0 * (double) Time::getHighResolutionTicksPerSecond())); }
 
     /**
         Fires one trigger from the editor's TEST button, whether or not sending
@@ -79,7 +84,8 @@ public:
 
     struct Stats
     {
-        uint32_t requested; // fire() calls while active
+        uint32_t requested; // triggers sent (fire() calls while active, outside the lockout)
+        uint32_t suppressed; // fire() calls dropped in the stimulation lockout
         uint32_t fired; // the Pi raised the line
         uint32_t busy; // of those, the MCU was mid-pulse and ignored it
         uint32_t rejected; // the Pi answered but did not fire
@@ -118,6 +124,8 @@ private:
     DatagramSocket testSocket; // TEST triggers: sender thread only
     uint32_t udpSeq_; // audio thread only; random start, see the constructor
     uint32_t testSeq_; // sender thread only
+
+    TriggerLockout lockout_; // audio thread, apart from the setting
 
     WaitableEvent wake;
     std::atomic<uint32_t> requested_ { 0 };

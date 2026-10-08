@@ -310,8 +310,9 @@ void RippleDetectorCanvas::updateCalibrationInfo()
         if (ls.requested > 0)
         {
             const bool udp = laser.getTransport() == LaserTrigger::Transport::Udp;
-            t += "\nLaser (" + String (udp ? "UDP" : "HTTP") + "): fired " + String ((int) ls.fired)
-                 + ", busy " + String ((int) ls.busy) + ", no answer " + String ((int) ls.failed)
+            t += "\nLaser (" + String (udp ? "UDP" : "HTTP") + "): sent " + String ((int) ls.requested) + ", fired "
+                 + String ((int) ls.fired) + ", busy " + String ((int) ls.busy) + ", no answer " + String ((int) ls.failed)
+                 + "\n  suppressed by Stim. Lockout: " + String ((int) ls.suppressed)
                  + "\n  " + String (udp ? "round trip " : "to Pi reply ") + String (ls.meanMs, 2) + " ms (max "
                  + String (ls.maxMs, 2) + ")";
             if (udp && ls.fired > 0)

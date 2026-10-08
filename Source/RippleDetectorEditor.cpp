@@ -123,7 +123,7 @@ private:
 
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
-    : VisualizerEditor (parentNode, "Ripple Detector", 693)
+    : VisualizerEditor (parentNode, "Ripple Detector", 793)
 {
     rippleDetector = (RippleDetector*) parentNode;
 
@@ -233,10 +233,16 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
         ed->setSize (TEXT_WIDTH - 62, ROW_HEIGHT);
     }
 
+    // One stimulus per event (applies to every stream)
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_lockout", 500, 22);
+    ParameterEditor* stimLockout = getParameterEditor ("stim_lockout");
+    stimLockout->setLayout (ParameterEditor::Layout::nameOnTop);
+    stimLockout->setSize (90, 34);
+
     /* Columns 4 and 5: EMG / ACC movement detection, anchored to the right edge.
        Mode, input and output sit in the rightmost column so the block stays flush
        right when movement detection is off and only mode and input are shown. */
-    int col4 = 595;
+    int col4 = 695;
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_detect", col4, 22);
     ParameterEditor* movDetect = getParameterEditor ("mov_detect");
@@ -276,7 +282,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movOut->setLayout (ParameterEditor::Layout::nameOnTop);
     movOut->setSize (80, 34);
 
-    int col5 = 500;
+    int col5 = 600;
 
     addTextBoxParameterEditor (Parameter::STREAM_SCOPE, "mov_std", col5, 22);
     ParameterEditor* movStd = getParameterEditor ("mov_std");

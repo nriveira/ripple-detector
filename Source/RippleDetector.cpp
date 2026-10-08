@@ -271,6 +271,22 @@ with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's
         65535,
         true);
 
+    // One stimulus per event. The stimulus's own artefact on the electrode can be detected again and
+    // fire the laser again, a loop that runs as a pulse train; streams that see the same event each
+    // fire too. Applies to the laser trigger only: the Ripple Output TTL still marks every detection.
+    addFloatParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "stim_lockout",
+        "Stim. Lockout",
+        "After the laser is triggered, no further trigger is sent for this long, whichever stream or mode asks for it, \
+so each event sends exactly one UDP trigger. Detections in the lockout still get their Ripple Output TTL and are counted \
+as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval. 0: off.",
+        "ms",
+        500,
+        0,
+        60000,
+        10);
+
     /* EMG / ACC Movement Detection Settings */
     addCategoricalParameter (
         Parameter::STREAM_SCOPE,
@@ -364,6 +380,7 @@ void RippleDetector::updateSettings()
 
     settings.update (getDataStreams());
     configureLaserTrigger (true);
+    laserTrigger.setLockoutMs ((float) getParameter ("stim_lockout")->getValue());
 
     for (auto stream : getDataStreams())
     {
@@ -961,7 +978,9 @@ bool RippleDetector::stopAcquisition()
     if (st.requested > 0)
     {
         const bool udp = laserTrigger.getTransport() == LaserTrigger::Transport::Udp;
-        LOGC ("Laser Trigger (", udp ? "UDP" : "HTTP", "): ", (int) st.requested, " requested, ", (int) st.fired, " fired (",
+        LOGC ("Laser Trigger (", udp ? "UDP" : "HTTP", "): ", (int) st.requested, " sent, ", (int) st.suppressed,
+              " suppressed by the ", (float) getParameter ("stim_lockout")->getValue(), " ms stimulation lockout (detections ",
+              "of the same event or of its artefact), ", (int) st.fired, " fired (",
               (int) st.busy, " while the MCU was mid-pulse, so ignored), ", (int) st.rejected, " rejected by the Pi, ",
               (int) st.failed, " unanswered; ", udp ? "round trip" : "request to Pi reply", " mean ", st.meanMs,
               " ms, max ", st.maxMs, " ms");
@@ -978,7 +997,9 @@ void RippleDetector::parameterValueChanged (Parameter* param)
 
     if (param->getScope() == Parameter::PROCESSOR_SCOPE)
     {
-        if (paramName.equalsIgnoreCase ("laser_trigger"))
+        if (paramName.equalsIgnoreCase ("stim_lockout"))
+            laserTrigger.setLockoutMs ((float) param->getValue());
+        else if (paramName.equalsIgnoreCase ("laser_trigger"))
             configureLaserTrigger (false);
         else if (paramName.startsWithIgnoreCase ("laser_"))
             configureLaserTrigger (true);
@@ -1750,12 +1771,9 @@ void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex,
     RippleDetectorSettings* s = settings[streamId];
 
     // Requested first: it is the latency path to the stimulus
-    if (state)
-    {
-        laserTrigger.fire();
-        if (firedStreams.size() < firedStreams.capacity())
-            firedStreams.push_back (streamId);
-    }
+    // Only a trigger actually sent (not one dropped in the stimulation lockout) is relayed to other streams
+    if (state && laserTrigger.fire() && firedStreams.size() < firedStreams.capacity())
+        firedStreams.push_back (streamId);
 
     addEvent (s->createEvent (s->rippleOutputChannel, firstSample + sampleIndex, state), sampleIndex);
     s->rippleTtlHigh = state;

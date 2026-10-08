@@ -75,11 +75,14 @@ With **Laser Trigger** on, every ripple onset fires the laser through the [Laser
 | Control | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `TEST` | Fires once, whether or not `Laser Trigger` is on, and shows the answer on the button: the round trip in ms when it fired, `BUSY` (the laser was mid-pulse and ignores it), `NO MCU` (the Pi has not heard from the laser controller), `REJECTED` (the Pi answered but did not fire), `NO LINK` (no answer) or `SET HOST` |
+| `Stim. Lockout` | After a trigger is sent, none is sent for this long (default 500 ms, 0 = off), whichever stream or mode asks: one UDP trigger per event. Detections in the lockout keep their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval |
+| `TEST` | Fires once, whether or not `Laser Trigger` is on (and outside the lockout), and shows the answer on the button: the round trip in ms when it fired, `BUSY` (the laser was mid-pulse and ignores it), `NO MCU` (the Pi has not heard from the laser controller), `REJECTED` (the Pi answered but did not fire), `NO LINK` (no answer) or `SET HOST` |
 | `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so a trigger never waits on a lookup) |
 | `UDP` / `HTTP` + `Port` | Transport, and its port (UDP 17017, HTTP 8080) |
 
-The settings apply to every stream. The viewer panel and the log at the end of each run report how many triggers were fired, fired while the laser was busy, rejected or left unanswered, with the round trip and, over UDP, the time from the Pi receiving the datagram to raising the line.
+The plugin sends a trigger only where its Ripple Output TTL goes high, so every trigger has an event in the recording. The only other datagrams are the TEST button's and a PING whenever the signal chain updates, which the broker answers without touching the GPIO. Laser pulses with no event come from the LaserHAT side. To find which, run `Tools/laserhat_pulse_monitor.py` on the Pi. It logs every pulse the laser controller makes and whether a UDP trigger started it, or something else did: the BNC trigger input, button 1, the web GUI or UART. It also logs whether the controller was lost; a reset makes its output blink about 20 times at about 5 Hz while it boots, which looks like a pulse train on the Stim. Input.
+
+The settings apply to every stream. The viewer panel and the log at the end of each run report how many triggers were sent, how many were suppressed by the lockout, how many were fired, fired while the laser was busy, rejected or left unanswered, with the round trip and, over UDP, the time from the Pi receiving the datagram to raising the line.
 
 The UDP datagrams are in `Source/LaserTriggerUdp.h`, a mirror of LaserDriver `Pi/brokerd/udp_trigger.h`, checked byte for byte against LaserDriver's `Pi/udp_trigger.py` by `Tests/LaserTriggerUdpTests.cpp`. The HTTP request and reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors `Pi/web_app.py`.
 
