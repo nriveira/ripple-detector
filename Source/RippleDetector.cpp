@@ -104,15 +104,42 @@ switching back to Ripple recalibrates the stream.",
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
+        "pulse_sds",
+        "Pulse SDs",
+        "Pulse (test) mode: a rising edge must climb this many noise SDs above the channel's running baseline. The noise SD \
+is estimated continuously from the channel (pulses excluded), so the threshold follows the signal's noise level. The \
+threshold used is the larger of this and Min Step.",
+        "SD",
+        8,
+        0,
+        1000,
+        0.5);
+
+    // Saved as "pulse_thresh", the earlier fixed threshold, which this floor replaces
+    addFloatParameter (
+        Parameter::STREAM_SCOPE,
         "pulse_thresh",
-        "Pulse Thresh.",
-        "Pulse (test) mode: distance from the channel's running baseline, in the channel's units (uV for headstage channels), \
-that counts as a pulse edge. Either polarity. Must hold for 2 consecutive samples.",
+        "Min Step",
+        "Pulse (test) mode: a rising edge must also climb at least this far above the baseline, in the channel's units (uV for \
+headstage channels), so a very quiet signal does not respond to tiny steps. 0: the noise threshold alone.",
         "uV",
-        200,
+        100,
         0,
         1000000,
         10);
+
+    addFloatParameter (
+        Parameter::STREAM_SCOPE,
+        "pulse_width",
+        "Min Width",
+        "Pulse (test) mode: the signal must stay above the threshold this long (75% of the samples) to count as a pulse, so \
+spikes and short bursts of noise are ignored. Keep it shorter than the test pulses (1 ms in the test recording); the \
+response is decided this long after the edge, while the latency is still measured from the edge.",
+        "ms",
+        0.3,
+        0,
+        100,
+        0.1);
 
     addFloatParameter (
         Parameter::STREAM_SCOPE,
@@ -432,7 +459,9 @@ void RippleDetector::updateSettings()
 
         s->pulseParams = PulseEdgeDetector::Params();
         s->pulseParams.sampleRate = stream->getSampleRate();
+        parameterValueChanged (stream->getParameter ("pulse_sds"));
         parameterValueChanged (stream->getParameter ("pulse_thresh"));
+        parameterValueChanged (stream->getParameter ("pulse_width"));
         parameterValueChanged (stream->getParameter ("pulse_lockout"));
         parameterValueChanged (stream->getParameter ("periodic_count"));
         parameterValueChanged (stream->getParameter ("periodic_interval"));
@@ -716,7 +745,9 @@ RippleDetector::TestStats RippleDetector::getTestStats (uint16 streamId)
         return {};
 
     const RippleDetectorSettings* s = settings[streamId];
-    return { s->testTriggered.load(), s->periodicSent.load(), s->pulseParams.thresholdUv, s->pulseParams.lockoutMs,
+    return { s->testTriggered.load(), s->periodicSent.load(), s->pulseParams.minStepUv, s->pulseParams.thresholdSds,
+             s->pulseParams.minWidthMs, s->pulseParams.lockoutMs, s->pulseNoiseSd.load(), s->pulseThreshold.load(),
+             s->pulseRejected.load(),
              s->periodicCount, s->periodicIntervalS };
 }
 
@@ -1034,9 +1065,19 @@ void RippleDetector::parameterValueChanged (Parameter* param)
         s->periodicRun = false;
         refreshEditor();
     }
+    else if (paramName.equalsIgnoreCase ("pulse_sds"))
+    {
+        s->pulseParams.thresholdSds = (float) param->getValue();
+        s->testParamsDirty = true;
+    }
+    else if (paramName.equalsIgnoreCase ("pulse_width"))
+    {
+        s->pulseParams.minWidthMs = (float) param->getValue();
+        s->testParamsDirty = true;
+    }
     else if (paramName.equalsIgnoreCase ("pulse_thresh"))
     {
-        s->pulseParams.thresholdUv = (float) param->getValue();
+        s->pulseParams.minStepUv = (float) param->getValue();
         s->testParamsDirty = true;
     }
     else if (paramName.equalsIgnoreCase ("pulse_lockout"))
@@ -1577,7 +1618,11 @@ void RippleDetector::processTestTrigger (uint16 streamId, const float* data, int
         s->pulse.process (data, numSamples, s->pulseEvents, s->featureScratch.data());
     }
 
-    const float threshold = (float) s->pulse.getParams().thresholdUv;
+    // The threshold follows the channel's noise (0 until its first estimate)
+    const float threshold = (float) s->pulse.getThreshold();
+    s->pulseNoiseSd = (float) s->pulse.getNoiseSd();
+    s->pulseThreshold = threshold;
+    s->pulseRejected = s->pulse.getRejected();
     const float eventLevel = periodicMode ? TEST_EVENT_LEVEL : threshold;
 
     // Drive the outputs, and mark the output TTL for the viewer

@@ -189,7 +189,9 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     addAndMakeVisible (panelTitle.get());
 
     addParameterRow ("detect_mode", true);
+    addParameterRow ("pulse_sds", false);
     addParameterRow ("pulse_thresh", false);
+    addParameterRow ("pulse_width", false);
     addParameterRow ("pulse_lockout", false);
     addParameterRow ("periodic_count", false);
     addParameterRow ("periodic_interval", false);
@@ -333,8 +335,12 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     else if (testMode == RippleDetector::TEST_PULSE)
     {
         const auto ts = processor->getTestStats (streamId);
-        text = "Pulse test mode: edges " + String (ts.thresholdUv, 0) + String::fromUTF8 (" \xc2\xb5V") + " from baseline,\nlockout "
-               + String (ts.lockoutMs, 0) + " ms. Pulses detected: " + String ((int) ts.triggered);
+        const String uv = String::fromUTF8 (" \xc2\xb5V");
+        text = "Pulse test mode: rising edges above\nmax(" + String (ts.thresholdSds, 1) + " x noise SD, " + String (ts.minStepUv, 0) + uv
+               + ") for " + String (ts.minWidthMs, 1) + " ms.\n";
+        text += ts.thresholdNowUv > 0.0f ? "Noise SD " + String (ts.noiseSdUv, 1) + uv + ", threshold " + String (ts.thresholdNowUv, 0) + uv + ".\n"
+                                         : String ("Estimating the noise...\n");
+        text += "Pulses detected: " + String ((int) ts.triggered) + ", too short: " + String ((int) ts.rejected);
         text += latencyAndLaserText();
     }
     else if (testMode == RippleDetector::TEST_PERIODIC)
@@ -389,7 +395,7 @@ void RippleDetectorCanvas::updateParameterVisibility()
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (! pulse);
 
-    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+    for (auto* name : { "pulse_sds", "pulse_thresh", "pulse_width", "pulse_lockout" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (testMode == RippleDetector::TEST_PULSE);
 
@@ -900,7 +906,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         g.setColour (ONSET_COLOUR);
         g.drawHorizontalLine ((int) yFor (1.0f), (float) plot.getX(), (float) plot.getRight());
         g.setFont (FontOptions ("Inter", "Regular", 12.0f));
-        g.drawText ("threshold: " + String (ts.thresholdUv, 0) + String::fromUTF8 (" \xc2\xb5V"),
+        g.drawText ("threshold: " + String (ts.thresholdNowUv, 0) + String::fromUTF8 (" \xc2\xb5V"),
                     plot.getRight() - 150, (int) yFor (1.0f) - 16, 146, 14, Justification::centredRight);
     }
     // Ripple mode: mean + x SD, i.e. x in these units; the same for the noise trace
@@ -947,7 +953,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     g.setColour (TRACE_COLOUR);
     if (testMode == RippleDetector::TEST_PULSE)
     {
-        g.drawText ("|signal - baseline| (x threshold)", plot.getX() + 8, plot.getY() + 4, 230, 18, Justification::centredLeft);
+        g.drawText ("signal - baseline (x threshold)", plot.getX() + 8, plot.getY() + 4, 230, 18, Justification::centredLeft);
         g.setColour (EVENT_COLOUR);
         g.drawText ("output TTL", plot.getX() + 240, plot.getY() + 4, 90, 18, Justification::centredLeft);
     }

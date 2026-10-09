@@ -79,6 +79,9 @@ public:
     std::atomic<uint32_t> testTriggered { 0 }; // responses this run
     std::atomic<uint32_t> testIgnored { 0 }; // pulses ignored in the lockout this run (detected pulses re-arm, so mostly 0)
     std::atomic<uint32_t> periodicSent { 0 };
+    std::atomic<float> pulseNoiseSd { 0.0f }; // Pulse: the detector's noise estimate and threshold, for the viewer
+    std::atomic<float> pulseThreshold { 0.0f };
+    std::atomic<uint32_t> pulseRejected { 0 };
     std::atomic<bool> periodicRun { false }; // Periodic: START pressed and the sequence not finished (message thread sets it)
     bool periodicActive { false }; // audio thread: the schedule is running
 
@@ -210,8 +213,13 @@ public:
     {
         uint32_t triggered; // responses this run
         uint32_t periodicSent; // Periodic: responses sent this run
-        double thresholdUv; // Pulse: Pulse Thresh.
+        double minStepUv; // Pulse: Min Step
+        double thresholdSds; // Pulse: Pulse SDs
+        double minWidthMs; // Pulse: Min Width
         double lockoutMs; // Pulse: Lockout
+        float noiseSdUv; // Pulse: the channel's noise SD estimate now
+        float thresholdNowUv; // Pulse: the threshold it gives (0 before the first estimate)
+        uint32_t rejected; // Pulse: crossings shorter than Min Width
         int periodicCount;
         double periodicIntervalS;
     };

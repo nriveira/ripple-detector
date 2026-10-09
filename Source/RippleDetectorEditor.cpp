@@ -177,8 +177,10 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     addRow ("rms_samples", col2, ROW_Y[3]);
 
     // Pulse test mode: its settings take the place of the ripple settings (updateMethodView)
-    addRow ("pulse_thresh", col2, ROW_Y[0]);
-    addRow ("pulse_lockout", col2, ROW_Y[1]);
+    addRow ("pulse_sds", col2, ROW_Y[0]);
+    addRow ("pulse_thresh", col2, ROW_Y[1]);
+    addRow ("pulse_width", col2, ROW_Y[2]);
+    addRow ("pulse_lockout", col2, ROW_Y[3]);
     addRow ("periodic_count", col2, ROW_Y[0]);
     addRow ("periodic_interval", col2, ROW_Y[1]);
 
@@ -512,7 +514,7 @@ void RippleDetectorEditor::updateMethodView()
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (! pulse);
 
-    for (auto* name : { "pulse_thresh", "pulse_lockout" })
+    for (auto* name : { "pulse_sds", "pulse_thresh", "pulse_width", "pulse_lockout" })
         if (auto* ed = getParameterEditor (name))
             ed->setVisible (testMode == RippleDetector::TEST_PULSE);
 
