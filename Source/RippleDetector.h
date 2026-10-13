@@ -41,6 +41,31 @@ public:
     FeatureFifo viewerFifo; // Hands features to the viewer
 
     int rippleInputChannel { -1 }; // Global index of the ripple input channel, -1 for None (nothing is detected)
+
+    // --- Detection on another stream's channel (e.g. the LFP stream's) ---
+    // Ripple Input may name a channel of another stream. Detection then runs on that stream's samples at
+    // its rate, and its TTL edges, latency and feature channels are mapped onto this stream's samples.
+    struct ChannelChoice
+    {
+        uint16 streamId; // 0: this stream
+        int globalIndex;
+    };
+    std::vector<ChannelChoice> rippleChoices; // per "ripple_input" entry (entry 0: None)
+    uint16 rippleSourceStreamId { 0 }; // the stream detection runs on, 0 = this stream
+    float detectionRate { 30000.0f }; // that stream's sample rate
+    double toStreamRate { 1.0 }; // this stream's rate / detectionRate
+    int rmsSamplesSetting { 128 }; // "rms_samples", in this stream's samples (the window keeps its duration)
+    int blockStream { 0 }; // this block's samples on this stream ...
+    int blockDetect { 0 }; // ... and on the detection stream
+    std::array<std::vector<float>, 3> outputScratch; // feature channels at the detection rate, before mapping
+
+    /** A sample of the detection stream's block, as a sample of this stream's block */
+    int toStream (int i) const
+    {
+        if (blockDetect == blockStream || blockDetect <= 0)
+            return i;
+        return std::min (std::max (0, blockStream - 1), (int) ((int64) i * blockStream / blockDetect));
+    }
     std::vector<float> silentScratch; // zeros standing in for the ripple channel when it is None
 
     // --- Noise channel veto ---
@@ -176,6 +201,10 @@ public:
     /** False when the stream's Ripple Input is None */
     bool hasRippleInput (uint16 streamId);
 
+    /** The rate detection runs at for a stream (its Ripple Input's stream's), and that stream's name */
+    float getDetectionRate (uint16 streamId);
+    String getDetectionStreamName (uint16 streamId);
+
     /** True if the stream has a noise channel selected */
     bool hasNoiseChannel (uint16 streamId);
 
@@ -290,9 +319,15 @@ private:
     /** Asks the editor to refresh its custom controls */
     void refreshEditor();
 
-    /** Fills a channel drop-down ("ripple_channel" or "noise_channel") with the stream's channel
-        names, optionally after "None", keeping the chosen channel by name */
-    void setChannelChoices (const DataStream* stream, const String& paramName, bool withNone);
+    /** Fills a channel drop-down ("noise_channel") with the channel names of 'source' (this
+        stream's when null), optionally after "None", keeping the chosen channel by name */
+    void setChannelChoices (const DataStream* stream, const String& paramName, bool withNone, const DataStream* source = nullptr);
+
+    /** Fills "ripple_input": None, this stream's channels, then the other streams' electrode channels */
+    void setRippleChoices (const DataStream* stream);
+
+    /** Applies the detection stream's rate (after Ripple Input or RMS Samples changed) */
+    void updateDetectionRate (uint16 streamId);
 
     /** Replaces a drop-down's entries, keeping the chosen entry by name (entry 0 stays put if it is a fixed choice) */
     static void setChoicesKeepingName (CategoricalParameter* param, const Array<String>& choices, bool firstIsFixed);

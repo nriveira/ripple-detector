@@ -48,7 +48,9 @@ float niceStep (float rawStep)
 
 void RippleDetectorCanvas::StreamDisplay::reset (float sampleRate)
 {
-    binSamples = std::max (1, (int) std::round (sampleRate * BIN_MS / 1000.0f));
+    rate = sampleRate;
+    binSamples = std::max (1.0, (double) sampleRate * BIN_MS / 1000.0);
+    binFill = 0.0;
     bins.assign ((size_t) (HISTORY_SECONDS * 1000 / BIN_MS), Bin());
     head = 0;
     count = 0;
@@ -75,8 +77,12 @@ void RippleDetectorCanvas::StreamDisplay::accumulate (const float* const* values
         }
         current.flags |= flags[i];
 
-        if (++samplesInBin >= binSamples)
+        samplesInBin++;
+        if ((binFill += 1.0) >= binSamples)
+        {
+            binFill -= binSamples;
             push();
+        }
     }
 }
 
@@ -243,8 +249,14 @@ void RippleDetectorCanvas::updateSettings()
 {
     const uint16 streamId = currentStreamId();
 
+    // The viewer shows the stream detection runs on (another stream's when Ripple Input is one of its channels)
     if (auto* stream = processor->getDataStream (streamId))
-        streamLabel->setText (stream->getName() + "  (" + String (stream->getSampleRate(), 0) + " Hz)", dontSendNotification);
+    {
+        const String detected = processor->getDetectionStreamName (streamId);
+        streamLabel->setText (stream->getName() + (detected != stream->getName() ? String::fromUTF8 ("  \xe2\x86\x90 ") + detected : String())
+                                  + "  (" + String (processor->getDetectionRate (streamId), 0) + " Hz)",
+                              dontSendNotification);
+    }
     else
         streamLabel->setText ("No stream", dontSendNotification);
 
@@ -253,10 +265,11 @@ void RippleDetectorCanvas::updateSettings()
     for (auto s : processor->getDataStreams())
     {
         auto it = displays.find (s->getStreamId());
-        if (it != displays.end() && it->second.binSamples > 0 && ! it->second.bins.empty())
+        const float rate = processor->getDetectionRate (s->getStreamId());
+        if (it != displays.end() && ! it->second.bins.empty() && it->second.rate == rate)
             kept[s->getStreamId()] = std::move (it->second);
         else
-            kept[s->getStreamId()].reset (s->getSampleRate());
+            kept[s->getStreamId()].reset (rate);
     }
     displays = std::move (kept);
 
@@ -450,7 +463,7 @@ void RippleDetectorCanvas::pullData (bool discard)
         auto it = displays.find (streamId);
         if (it == displays.end())
         {
-            displays[streamId].reset (stream->getSampleRate());
+            displays[streamId].reset (processor->getDetectionRate (streamId));
             it = displays.find (streamId);
         }
         StreamDisplay& display = it->second;

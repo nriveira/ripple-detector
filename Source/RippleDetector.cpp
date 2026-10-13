@@ -46,10 +46,13 @@ void RippleDetector::registerParameters()
             "ripple_input",
             "Ripple Input",
             "Continuous input channel on which ripples are detected, by channel name (in Pulse (test), the channel carrying \
-the test pulses). Defaults to the stream's first channel. None: nothing is detected on this stream (no TTL, no laser \
-trigger); Periodic (test) still runs.",
+the test pulses). Defaults to the stream's first channel. The list also offers the other streams' electrode channels, \
+e.g. the LFP stream's (\"LFPStream: LFP_A_CH1\"): detection then runs on that stream at its rate, and the output TTL, \
+the latency and the feature channels stay on this stream. None: nothing is detected on this stream (no TTL, no laser \
+trigger); Periodic (test) still runs. Locked during acquisition.",
             choices,
-            1);
+            1,
+            true);
     }
 
     // The noise channel's first entry is "None" (the default): a channel selector would pre-select
@@ -450,10 +453,11 @@ void RippleDetector::updateSettings()
         if (s->featureOutputActive)
             addFeatureChannels (getDataStream (streamId));
 
-        // The channel drop-downs list the stream's own channel names
-        setChannelChoices (stream, "ripple_input", true);
-        setChannelChoices (stream, "noise_channel", true);
+        // Ripple Input lists this stream's channels and the other streams'; Noise Input lists the
+        // channels of the stream Ripple Input's channel belongs to
+        setRippleChoices (stream);
         parameterValueChanged (stream->getParameter ("ripple_input"));
+        setChannelChoices (stream, "noise_channel", true, getDataStream (s->rippleSourceStreamId));
         parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
 
@@ -487,6 +491,9 @@ void RippleDetector::updateSettings()
         parameterValueChanged (stream->getParameter ("min_time_st"));
         parameterValueChanged (stream->getParameter ("min_time_mov"));
 
+        // The detection stream's rate, now that Ripple Input and RMS Samples are known
+        updateDetectionRate (streamId);
+
         //Add event channels to use for detection data
         EventChannel::Settings evSettings {
             EventChannel::Type::TTL,
@@ -503,6 +510,29 @@ void RippleDetector::updateSettings()
 
 namespace
 {
+/**
+    Detection on another stream's channel writes this stream's feature channels at the detection
+    stream's rate into scratch buffers; when the block's processing ends (whichever way), this maps
+    them onto this stream's samples, holding each value until the next.
+*/
+struct FeatureOutputMapper
+{
+    std::array<float*, 3> targets { nullptr, nullptr, nullptr }; // this stream's RIP_FEAT, RIP_THR, RIP_EVENT
+    std::array<std::vector<float>, 3>* scratch { nullptr };
+    int streamSamples { 0 };
+    int detectSamples { 0 };
+
+    ~FeatureOutputMapper()
+    {
+        if (scratch == nullptr || detectSamples <= 0)
+            return;
+        for (size_t k = 0; k < targets.size(); k++)
+            if (targets[k] != nullptr)
+                for (int i = 0; i < streamSamples; i++)
+                    targets[k][i] = (*scratch)[k][(size_t) std::min (detectSamples - 1, (int) ((int64) i * detectSamples / streamSamples))];
+    }
+};
+
 /** Shows a message box once the current message (e.g. a parameter change) has been handled. Showing it
     from inside a parameter handler could suspend the handler until the box was dismissed, leaving the
     setting half-applied (and an HTTP API request waiting). */
@@ -536,15 +566,88 @@ void RippleDetector::setChoicesKeepingName (CategoricalParameter* param, const A
     }
 }
 
-void RippleDetector::setChannelChoices (const DataStream* stream, const String& paramName, bool withNone)
+void RippleDetector::setChannelChoices (const DataStream* stream, const String& paramName, bool withNone, const DataStream* source)
 {
     Array<String> choices;
     if (withNone)
         choices.add ("None");
-    for (auto* channel : stream->getContinuousChannels())
+    for (auto* channel : (source != nullptr ? source : stream)->getContinuousChannels())
         choices.add (channel->getName());
 
     setChoicesKeepingName ((CategoricalParameter*) stream->getParameter (paramName), choices, withNone);
+}
+
+void RippleDetector::setRippleChoices (const DataStream* stream)
+{
+    RippleDetectorSettings* s = settings[stream->getStreamId()];
+
+    // This stream's channels first, so their positions do not depend on which other streams are present
+    Array<String> choices { "None" };
+    s->rippleChoices = { { 0, -1 } };
+    for (auto* channel : stream->getContinuousChannels())
+    {
+        choices.add (channel->getName());
+        s->rippleChoices.push_back ({ 0, channel->getGlobalIndex() });
+    }
+
+    // Then the other streams' electrode channels, e.g. the GLANCE board's LFP stream next to its broadband one
+    for (auto other : getDataStreams())
+    {
+        if (other->getStreamId() == stream->getStreamId())
+            continue;
+        for (auto* channel : other->getContinuousChannels())
+            if (channel->getChannelType() == ContinuousChannel::Type::ELECTRODE)
+            {
+                choices.add (other->getName() + ": " + channel->getName());
+                s->rippleChoices.push_back ({ other->getStreamId(), channel->getGlobalIndex() });
+            }
+    }
+
+    setChoicesKeepingName ((CategoricalParameter*) stream->getParameter ("ripple_input"), choices, true);
+}
+
+void RippleDetector::updateDetectionRate (uint16 streamId)
+{
+    RippleDetectorSettings* s = settings[streamId];
+    const DataStream* stream = getDataStream (streamId);
+    const DataStream* source = s->rippleSourceStreamId != 0 ? getDataStream (s->rippleSourceStreamId) : stream;
+    if (stream == nullptr || source == nullptr)
+        return;
+
+    const float rate = source->getSampleRate();
+    s->detectionRate = rate;
+    s->toStreamRate = rate > 0.0f ? (double) stream->getSampleRate() / (double) rate : 1.0;
+
+    // Everything that counts samples runs at the detection stream's rate. RMS Samples is set in this
+    // stream's samples, so the window keeps its duration on a slower stream.
+    s->params.sampleRate = rate;
+    s->params.rmsSamples = std::max (1, (int) std::lround (s->rmsSamplesSetting / s->toStreamRate));
+    applyParams (streamId);
+
+    s->pulseParams.sampleRate = rate;
+    s->testParamsDirty = true;
+
+    s->calibrationPoints = (int) (rate * CALIBRATION_DURATION_SECONDS);
+    s->viewerFifo.setCapacity (rate, VIEWER_FIFO_SECONDS);
+    for (auto& v : s->outputScratch)
+        v.assign ((size_t) std::max (1024.0f, rate), 0.0f);
+}
+
+float RippleDetector::getDetectionRate (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return 0.0f;
+
+    return settings[streamId]->detectionRate;
+}
+
+String RippleDetector::getDetectionStreamName (uint16 streamId)
+{
+    if (streamId == 0 || getDataStream (streamId) == nullptr)
+        return {};
+
+    const DataStream* source = getDataStream (settings[streamId]->rippleSourceStreamId);
+    return source != nullptr ? source->getName() : getDataStream (streamId)->getName();
 }
 
 void RippleDetector::setMovementSourceChoices (const DataStream* stream)
@@ -1045,16 +1148,29 @@ void RippleDetector::parameterValueChanged (Parameter* param)
 
     if (paramName.equalsIgnoreCase ("ripple_input"))
     {
-        // Entry 0 is "None"; entry i is the stream's channel i - 1
+        // Entry 0 is "None", then this stream's channels, then the other streams' (setRippleChoices)
         const int choice = ((CategoricalParameter*) param)->getSelectedIndex();
-        const auto channels = getDataStream (streamId)->getContinuousChannels();
-        const int channel = choice > 0 && choice <= channels.size() ? channels[choice - 1]->getGlobalIndex() : -1;
+        const auto chosen = isPositiveAndBelow (choice, (int) s->rippleChoices.size()) ? s->rippleChoices[(size_t) choice]
+                                                                                        : RippleDetectorSettings::ChannelChoice { 0, -1 };
+        const uint16 source = chosen.globalIndex >= 0 && getDataStream (chosen.streamId) != nullptr ? chosen.streamId : 0;
+        const int channel = chosen.streamId == source ? chosen.globalIndex : -1;
 
-        if (channel != s->rippleInputChannel)
+        if (channel != s->rippleInputChannel || source != s->rippleSourceStreamId)
         {
             // A new channel needs its own baseline
+            const bool streamChanged = source != s->rippleSourceStreamId;
             s->rippleInputChannel = channel;
+            s->rippleSourceStreamId = source;
             s->calibrate = true;
+
+            // The noise channel must come from the same stream (in updateSettings() this is done afterwards)
+            if (streamChanged && ! updatingSettings)
+            {
+                const DataStream* stream = getDataStream (streamId);
+                setChannelChoices (stream, "noise_channel", true, getDataStream (source));
+                parameterValueChanged (stream->getParameter ("noise_channel"));
+                updateDetectionRate (streamId);
+            }
         }
         refreshEditor();
     }
@@ -1101,9 +1217,10 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     }
     else if (paramName.equalsIgnoreCase ("noise_channel"))
     {
-        // Entry 0 is "None"; entry i is the stream's channel i - 1
+        // Entry 0 is "None"; entry i is channel i - 1 of the stream detection runs on
         const int choice = ((CategoricalParameter*) param)->getSelectedIndex();
-        const auto channels = getDataStream (streamId)->getContinuousChannels();
+        const DataStream* source = getDataStream (s->rippleSourceStreamId);
+        const auto channels = (source != nullptr ? source : getDataStream (streamId))->getContinuousChannels();
         int channel = -1;
 
         if (choice > 0 && choice <= channels.size())
@@ -1145,8 +1262,9 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     }
     else if (paramName.equalsIgnoreCase ("rms_samples"))
     {
-        s->params.rmsSamples = (int) param->getValue();
-        applyParams (streamId);
+        s->rmsSamplesSetting = (int) param->getValue();
+        if (! updatingSettings)
+            updateDetectionRate (streamId); // also applies it
     }
     else if (paramName.equalsIgnoreCase ("feature_out"))
     {
@@ -1326,18 +1444,43 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
             s->noiseVeto->setParams (s->params);
         }
 
-        // Scratch buffers for this block
-        if ((int) s->featureScratch.size() < numSamplesInBlock)
+        // Detection runs on Ripple Input's stream: this one, or another (e.g. the LFP stream) with its
+        // own block length and rate. Its outputs are mapped onto this stream's samples (toStream()).
+        const bool otherStream = s->rippleSourceStreamId != 0;
+        const int detectSamples = otherStream ? (int) getNumSamplesInBlock (s->rippleSourceStreamId) : numSamplesInBlock;
+        s->blockStream = numSamplesInBlock;
+        s->blockDetect = detectSamples;
+
+        FeatureOutputMapper mapper;
+        if (otherStream && featureOut != nullptr && detectSamples > 0)
         {
-            s->featureScratch.resize ((size_t) numSamplesInBlock);
-            s->zScratch.resize ((size_t) numSamplesInBlock);
-            s->flagScratch.resize ((size_t) numSamplesInBlock);
-            s->noiseFeatureScratch.resize ((size_t) numSamplesInBlock);
-            s->silentScratch.assign ((size_t) numSamplesInBlock, 0.0f);
+            mapper.targets = { featureOut, thresholdOut, eventOut };
+            mapper.scratch = &s->outputScratch;
+            mapper.streamSamples = numSamplesInBlock;
+            mapper.detectSamples = detectSamples;
+            for (auto& v : s->outputScratch)
+                if ((int) v.size() < detectSamples)
+                    v.resize ((size_t) detectSamples);
+            featureOut = s->outputScratch[0].data();
+            thresholdOut = s->outputScratch[1].data();
+            eventOut = s->outputScratch[2].data();
+            for (auto* out : { featureOut, thresholdOut, eventOut })
+                FloatVectorOperations::clear (out, detectSamples);
         }
 
-        // Ripple Input None: nothing to detect on (Periodic still runs)
-        const float* rippleData = s->rippleInputChannel >= 0 ? buffer.getReadPointer (s->rippleInputChannel, 0) : nullptr;
+        // Scratch buffers for this block
+        const int scratchSamples = std::max (numSamplesInBlock, detectSamples);
+        if ((int) s->featureScratch.size() < scratchSamples)
+        {
+            s->featureScratch.resize ((size_t) scratchSamples);
+            s->zScratch.resize ((size_t) scratchSamples);
+            s->flagScratch.resize ((size_t) scratchSamples);
+            s->noiseFeatureScratch.resize ((size_t) scratchSamples);
+            s->silentScratch.assign ((size_t) scratchSamples, 0.0f);
+        }
+
+        // Ripple Input None, or no samples of its stream in this block: nothing to detect on (Periodic still runs)
+        const float* rippleData = s->rippleInputChannel >= 0 && detectSamples > 0 ? buffer.getReadPointer (s->rippleInputChannel, 0) : nullptr;
 
         // The movement channels may be swapped by the message thread (updateMovementChannels); skip a
         // block rather than wait if that is happening right now
@@ -1391,7 +1534,14 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         if (s->testModeActive != TEST_OFF)
         {
             const float* data = rippleData != nullptr ? rippleData : s->silentScratch.data();
-            processTestTrigger (streamId, data, numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
+            processTestTrigger (streamId, data, otherStream ? detectSamples : numSamplesInBlock, firstSampleInBlock, featureOut, thresholdOut, eventOut);
+            s->latency.expire (firstSampleInBlock + numSamplesInBlock);
+            continue;
+        }
+
+        // Another stream's channel with no samples in this block: nothing changes until they arrive
+        if (rippleData == nullptr && s->rippleInputChannel >= 0)
+        {
             s->latency.expire (firstSampleInBlock + numSamplesInBlock);
             continue;
         }
@@ -1437,19 +1587,20 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         if (s->movSwitchEnabled && movLock.isLocked())
             processMovement (streamId, buffer, numSamplesInBlock, firstSampleInBlock);
 
+        // The noise channel belongs to the same stream as the ripple channel
         const float* noiseData = s->noiseInputChannel >= 0 ? buffer.getReadPointer (s->noiseInputChannel, 0) : nullptr;
-        processRipples (streamId, rippleData, noiseData, numSamplesInBlock, firstSampleInBlock, featureOut, eventOut);
+        processRipples (streamId, rippleData, noiseData, detectSamples, firstSampleInBlock, featureOut, eventOut);
         s->latency.expire (firstSampleInBlock + numSamplesInBlock);
 
         // The threshold is only defined once calibration has finished
         if (thresholdOut != nullptr && ! s->isCalibrating)
-            FloatVectorOperations::fill (thresholdOut, (float) s->method->getOnsetThreshold(), numSamplesInBlock);
+            FloatVectorOperations::fill (thresholdOut, (float) s->method->getOnsetThreshold(), detectSamples);
 
-        publishFeatures (streamId, rippleData, noiseData, numSamplesInBlock);
+        publishFeatures (streamId, rippleData, noiseData, detectSamples);
 
         if (s->isCalibrating)
         {
-            s->pointsProcessed += numSamplesInBlock;
+            s->pointsProcessed += detectSamples;
             s->calibrationProgress = std::min (1.0f, (float) s->pointsProcessed / (float) std::max (1, s->calibrationPoints));
 
             if (s->pointsProcessed >= s->calibrationPoints)
@@ -1534,18 +1685,18 @@ void RippleDetector::processRipples (uint16 streamId, const float* rippleData, c
                     }
                     else
                     {
-                        setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+                        setRippleTtl (streamId, true, s->toStream (ev.sampleIndex), firstSample);
                         newState = true;
 
                         // The decision could only be made once the onset's window was complete
                         const int decided = std::min (ev.sampleIndex + window, numSamples);
-                        s->latency.onsetEmitted (firstSample + ev.sampleIndex, firstSample + decided);
+                        s->latency.onsetEmitted (firstSample + s->toStream (ev.sampleIndex), firstSample + s->toStream (decided));
                     }
                 }
             }
             else if (high)
             {
-                setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+                setRippleTtl (streamId, false, s->toStream (ev.sampleIndex), firstSample);
                 newState = false;
             }
 
@@ -1648,17 +1799,19 @@ void RippleDetector::processTestTrigger (uint16 streamId, const float* data, int
 
         if (ev.type == PulseEdgeDetector::Event::Onset)
         {
-            setRippleTtl (streamId, true, ev.sampleIndex, firstSample);
+            const int at = s->toStream (ev.sampleIndex);
+            setRippleTtl (streamId, true, at, firstSample);
             s->flagScratch[(size_t) ev.sampleIndex] |= FeatureFifo::TTL_ONSET;
 
             // Event time: the pulse's first sample above threshold (the scheduled sample in Periodic);
-            // decision: the sample that confirmed it
-            s->latency.onsetEmitted (firstSample + ev.sampleIndex - ev.edgeOffset, firstSample + ev.sampleIndex);
+            // decision: the sample that confirmed it. In this stream's samples.
+            const int64 edgeOffset = (int64) std::llround (ev.edgeOffset * s->toStreamRate);
+            s->latency.onsetEmitted (firstSample + at - edgeOffset, firstSample + at);
             high = true;
         }
         else if (high)
         {
-            setRippleTtl (streamId, false, ev.sampleIndex, firstSample);
+            setRippleTtl (streamId, false, s->toStream (ev.sampleIndex), firstSample);
             high = false;
         }
     }
@@ -1867,7 +2020,7 @@ void RippleDetector::processMovement (uint16 streamId, AudioBuffer<float>& buffe
         movData = buffer.getReadPointer (s->movementChannels[0], 0);
     }
 
-    const int window = std::max (1, std::min (s->params.rmsSamples, sourceSamples));
+    const int window = std::max (1, std::min (s->rmsSamplesSetting, sourceSamples));
 
     s->movRmsValues.clear();
     s->movRmsNumSamples.clear();

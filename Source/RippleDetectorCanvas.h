@@ -74,7 +74,9 @@ private:
         size_t count { 0 };
         Bin current;
         int samplesInBin { 0 };
-        int binSamples { 1 };
+        double binSamples { 1.0 }; // fractional at rates that are not a multiple of 1 kHz (e.g. an LFP stream)
+        double binFill { 0.0 }; // samples towards the current bin, carrying the fraction over
+        float rate { 0.0f }; // the detection rate the bins were made for
 
         void reset (float sampleRate);
         void clearCurrent();
