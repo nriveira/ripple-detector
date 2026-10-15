@@ -2,7 +2,17 @@
 
 ![ripple-detector-screenshot](https://open-ephys.github.io/gui-docs/_images/rippledetector-01.png)
 
-Open Ephys GUI plugin for ripple detection. It contains an embedded mechanism based on EMG or accelerometer data that blocks ripple events when movement is detected. 
+Open Ephys GUI plugin for ripple detection. It contains an embedded mechanism based on EMG or accelerometer data that blocks ripple events when movement is detected.
+
+This fork (branch `feature/detection-methods`) adds, for closed-loop stimulation:
+
+- a **noise channel veto** that suppresses onsets seen on a reference channel too;
+- detection on **another stream's channel**, such as the GLANCE board's LFP stream;
+- movement data from **another stream**, such as the headstage IMU, with a movement panel in the viewer;
+- a **closed-loop laser trigger** to the LaserDriver Pi over UDP or HTTP, with a stimulation lockout (one trigger per event);
+- **stimulation latency** measured from the recording, also across streams;
+- **test modes**: Pulse (test), on test pulses in the data, and Periodic (test), on a timer started with START;
+- a **built-in viewer**, and optional **feature channels** for the LFP Viewer or recording.
 
 ## Installation
 
@@ -10,7 +20,7 @@ The plugin can be added via the Open Ephys GUI's built-in Plugin Installer. Pres
 
 ## Usage
 
-Instructions for using the Ripple Detector plugin are available [here](https://open-ephys.github.io/gui-docs/User-Manual/Plugins/Ripple-Detector.html).
+Instructions for the original Ripple Detector plugin are available [here](https://open-ephys.github.io/gui-docs/User-Manual/Plugins/Ripple-Detector.html). The sections below describe this fork, including what it adds.
 
 ## Detection method
 
@@ -20,7 +30,7 @@ The input channel is expected to be band-pass filtered in the ripple band (e.g. 
 2. During a 20 s **calibration** the RMS values are collected and their mean and standard deviation (SD) are estimated. The detection threshold is *mean + `Onset Std Dev` x SD*. No ripples are reported while calibrating.
 3. Once the RMS has stayed above the threshold for longer than `Time Thresh.`, a TTL pulse one window long is emitted on the `Ripple Output` line and a refractory period of `Refrac. Time` starts.
 
-Calibration runs automatically when acquisition starts and when the movement channels change. The **CALIBRATE** button (editor and viewer) restarts it, shows the progress while it runs, and has a tooltip describing the procedure. The viewer also prints the resulting baseline mean, SD and threshold.
+Calibration runs automatically when acquisition starts, when Ripple Input or Noise Input changes, and when the movement channels change. The **CALIBRATE** button (editor and viewer) restarts it, shows the progress while it runs, and has a tooltip describing the procedure. The viewer also prints the resulting baseline mean, SD and threshold.
 
 Notes:
 
@@ -129,10 +139,10 @@ Detection algorithms live in `Source/DetectionMethods/` and have no dependency o
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (rising edges only, noise levels from 3 to 300 µV, mixed pulse amplitudes, spikes, bursts and impulsive noise, a change in noise, AC coupling, stimulation artefacts, lockout, block sizes and external onsets), and `Tests/PeriodicScheduleTests.cpp` the periodic test mode's timer. All need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (rising edges only, noise levels from 3 to 300 µV, mixed pulse amplitudes, spikes, bursts and impulsive noise, a change in noise, AC coupling, stimulation artefacts, lockout, block sizes and external onsets), `Tests/PeriodicScheduleTests.cpp` the periodic test mode's timer, and `Tests/TriggerLockoutTests.cpp` the stimulation lockout. All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests && ./Tests/build/trigger_lockout_tests
 ```
 
 ## Building from source
@@ -167,6 +177,14 @@ cmake -G "Visual Studio 17 2022" -A x64 ..
 Next, launch Visual Studio and open the `OE_PLUGIN_ripple-detector.sln` file that was just created. Select the appropriate configuration (Debug/Release) and build the solution.
 
 Selecting the `INSTALL` project and manually building it will copy the `.dll` and any other required files into the GUI's `plugins` directory. The next time you launch the GUI from Visual Studio, the Ripple Detector plugin should be available.
+
+Or build and install from the command line, still in `Build`, with the GUI closed (Windows locks the installed `.dll` while it runs):
+
+```bash
+cmake --build . --config Release --target INSTALL
+```
+
+After pulling changes, run the `cmake -G ...` step again before building: new source files are only picked up when the project is regenerated. The plugin must be built in the same configuration (Debug or Release) as the GUI it is installed into.
 
 
 ### Linux
