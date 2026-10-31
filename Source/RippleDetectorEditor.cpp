@@ -241,6 +241,17 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     stimLockout->setLayout (ParameterEditor::Layout::nameOnTop);
     stimLockout->setSize (90, 34);
 
+    // The trigger as a TTL line, for a stimulus downstream such as Arduino Output
+    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "stim_out", 500, 57);
+    ParameterEditor* stimOut = getParameterEditor ("stim_out");
+    stimOut->setLayout (ParameterEditor::Layout::nameOnTop);
+    stimOut->setSize (90, 34);
+
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_width", 500, 92);
+    ParameterEditor* stimWidth = getParameterEditor ("stim_width");
+    stimWidth->setLayout (ParameterEditor::Layout::nameOnTop);
+    stimWidth->setSize (90, 34);
+
     /* Columns 4 and 5: EMG / ACC movement detection, anchored to the right edge.
        Mode, input and output sit in the rightmost column so the block stays flush
        right when movement detection is off and only mode and input are shown. */

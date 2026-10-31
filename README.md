@@ -10,6 +10,7 @@ This fork (branch `feature/detection-methods`) adds, for closed-loop stimulation
 - detection on **another stream's channel**, such as the GLANCE board's LFP stream;
 - movement data from **another stream**, such as the headstage IMU, with a movement panel in the viewer;
 - a **closed-loop laser trigger** to the LaserDriver Pi over UDP or HTTP, with a stimulation lockout (one trigger per event);
+- a **Stim. Output** TTL line that drives the GUI's Arduino Output plugin, for running without the LaserHAT;
 - **stimulation latency** measured from the recording, also across streams;
 - **test modes**: Pulse (test), on test pulses in the data, and Periodic (test), on a timer started with START;
 - a **built-in viewer**, and optional **feature channels** for the LFP Viewer or recording.
@@ -87,7 +88,7 @@ With **Laser Trigger** on, every ripple onset fires the laser through the [Laser
 | Control | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `Stim. Lockout` | After a trigger is sent, none is sent for this long (default 500 ms, 0 = off), whichever stream or mode asks: one UDP trigger per event. Detections in the lockout keep their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval |
+| `Stim. Lockout` | After a trigger is sent, none is sent for this long (default 500 ms, 0 = off), whichever stream or mode asks: one UDP trigger per event. **Stim. Output** is limited the same way. Detections in the lockout keep their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval |
 | `TEST` | Fires once, whether or not `Laser Trigger` is on (and outside the lockout), and shows the answer on the button: the round trip in ms when it fired, `BUSY` (the laser was mid-pulse and ignores it), `NO MCU` (the Pi has not heard from the laser controller), `REJECTED` (the Pi answered but did not fire), `NO LINK` (no answer) or `SET HOST` |
 | `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so a trigger never waits on a lookup) |
 | `UDP` / `HTTP` + `Port` | Transport, and its port (UDP 17017, HTTP 8080) |
@@ -99,6 +100,30 @@ The settings apply to every stream. The viewer panel and the log at the end of e
 The UDP datagrams are in `Source/LaserTriggerUdp.h`, a mirror of LaserDriver `Pi/brokerd/udp_trigger.h`, checked byte for byte against LaserDriver's `Pi/udp_trigger.py` by `Tests/LaserTriggerUdpTests.cpp`. The HTTP request and reply parsing are in `Source/LaserTriggerHttp.h`, which mirrors `Pi/web_app.py`.
 
 These numbers cover the network hop only; the next section measures the whole path from the recording.
+
+### Arduino output without the LaserHAT
+
+**Stim. Output** is the same trigger as a TTL line, for running with an Arduino and no LaserDriver Pi. The GUI's Arduino Output plugin talks to an Arduino running StandardFirmata; this plugin only sends it the TTL events.
+
+1. Upload **StandardFirmata** to the Arduino (Arduino IDE: File → Examples → Firmata), and plug it in before starting the GUI, as Arduino Output lists the ports once.
+2. Add **Arduino Output** after the Ripple Detector and choose the Arduino as its Device.
+3. In the Ripple Detector, set **Stim. Output** to a line that nothing else in the stream uses, such as the line above the board's digital inputs. Leave **Laser Trigger** off.
+4. Set Arduino Output's **Input line** to the same line. Its Output pin is the pin that pulses.
+
+| Control | Meaning |
+|---|---|
+| `Stim. Output` | TTL line that goes high once per stimulus (default None). It rises where a laser trigger is sent, whether or not `Laser Trigger` is on, and needs no Pi. Can only be changed while stopped |
+| `Stim. Width` | How long it stays high (default 50 ms) |
+| `Stim. Lockout` | Applies as it does to the laser trigger: one pulse per event, and detections in the lockout send no pulse |
+
+Each stimulus counts as sent for the stimulation latency, so **Stim. Input** and the relay to other streams work as with the laser. Wire the Arduino's pin to a digital input of the acquisition board to measure the latency, and use a different line for Stim. Input than for Stim. Output. The viewer panel and the log report how many pulses were sent and suppressed.
+
+Why not use Ripple Output? It ignores the lockout, and it is too short: plugins act on TTL events once per processing block (23 ms at the usual 1024 samples at 44.1 kHz), so a 10 ms TTL reaches Arduino Output as its rising and falling edge together and the pin goes high only for the serial write. Stim. Output always falls in a later block than it rose, so the pin stays high for `Stim. Width` rounded to whole blocks, and for at least one block: 46 ms for the default 50 ms at that block size. Timing also depends on the block: the pulse starts when the block with the detection is processed, plus the serial write, so expect more latency and jitter than with the UDP trigger.
+
+Two things to know about Arduino Output:
+
+- It only sends the pin mode to the Arduino when it connects, which uses the Output pin set at that moment. An Output pin changed afterwards is not set up as an output, so keep the default **pin 13**, which is also the on-board LED.
+- On Windows it lists only ports whose name starts with "Arduino", so a board that appears as "USB Serial Device" or "USB-SERIAL CH340" is not offered. With no device selected the plugin is disabled, which blocks acquisition.
 
 ### Measuring the stimulation latency
 
@@ -119,7 +144,7 @@ When the detection runs on one stream and the stimulus controller's TTL returns 
 
 ### Test modes
 
-Two **Detect** modes test the stimulation loop without ripples. Both respond exactly as to a ripple: Ripple Output TTL (10 ms), laser trigger and stimulation latency. Both bypass the noise veto and movement gating and need no calibration, and switching back to Ripple recalibrates the stream. The viewer marks each output TTL with a solid green line at its onset, and shows a banner for the mode.
+Two **Detect** modes test the stimulation loop without ripples. Both respond exactly as to a ripple: Ripple Output TTL (10 ms), laser trigger, Stim. Output and stimulation latency. Both bypass the noise veto and movement gating and need no calibration, and switching back to Ripple recalibrates the stream. The viewer marks each output TTL with a solid green line at its onset, and shows a banner for the mode.
 
 **Pulse (test)** detects square test pulses in the continuous data of the Ripple Input channel, from the File Reader recording in `Resources/Test Recording` or from test pulses played into saline. Each detection triggers the LaserHAT, whose output TTL returns to the acquisition board's digital input (Stim. Input). The stimulation artefact in the continuous data is analysed offline.
 

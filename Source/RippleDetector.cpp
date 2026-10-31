@@ -92,6 +92,20 @@ controller), excluding the headstage-to-board and stimulator latencies.",
         false,
         true);
 
+    // The laser trigger as a TTL, for a stimulus downstream in the chain such as Arduino Output
+    addTtlLineParameter (
+        Parameter::STREAM_SCOPE,
+        "stim_out",
+        "Stim. Output",
+        "TTL line that goes high once per stimulus, for a plugin after this one that drives a stimulus, such as Arduino Output \
+(set its Input line to this line). It rises where a laser trigger is sent, whether or not Laser Trigger is on, so it needs no \
+LaserHAT, is limited by Stim. Lockout and stays high for Stim. Width. Use a line that nothing else in the stream uses. None: off.",
+        16,
+        false,
+        true,
+        true);
+    getStreamParameter ("stim_out")->currentValue = -1; // None; a TTL line parameter starts on line 1
+
     /* Test modes */
     addCategoricalParameter (
         Parameter::STREAM_SCOPE,
@@ -303,19 +317,33 @@ with the Pi's own receive-to-edge time. HTTP: POST /api/trigger_gpio to the Pi's
 
     // One stimulus per event. The stimulus's own artefact on the electrode can be detected again and
     // fire the laser again, a loop that runs as a pulse train; streams that see the same event each
-    // fire too. Applies to the laser trigger only: the Ripple Output TTL still marks every detection.
+    // fire too. Applies to the laser trigger and Stim. Output: the Ripple Output TTL still marks every detection.
     addFloatParameter (
         Parameter::PROCESSOR_SCOPE,
         "stim_lockout",
         "Stim. Lockout",
         "After the laser is triggered, no further trigger is sent for this long, whichever stream or mode asks for it, \
-so each event sends exactly one UDP trigger. Detections in the lockout still get their Ripple Output TTL and are counted \
-as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval. 0: off.",
+so each event sends exactly one UDP trigger. Stim. Output is limited the same way. Detections in the lockout still get \
+their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval. 0: off.",
         "ms",
         500,
         0,
         60000,
         10);
+
+    // Plugins act on events once per block, so a pulse shorter than a block would reach Arduino Output
+    // as its rising and falling edge together, and the pin would only go high for the serial write
+    addFloatParameter (
+        Parameter::PROCESSOR_SCOPE,
+        "stim_width",
+        "Stim. Width",
+        "How long Stim. Output stays high. Plugins act on TTL events once per processing block, so a pin driven by Arduino Output \
+stays high for this long rounded to whole blocks, and for at least one block.",
+        "ms",
+        50,
+        1,
+        10000,
+        1);
 
     /* EMG / ACC Movement Detection Settings */
     addCategoricalParameter (
@@ -410,7 +438,8 @@ void RippleDetector::updateSettings()
 
     settings.update (getDataStreams());
     configureLaserTrigger (true);
-    laserTrigger.setLockoutMs ((float) getParameter ("stim_lockout")->getValue());
+    setStimLockoutMs ((float) getParameter ("stim_lockout")->getValue());
+    stimOutputWidthMs = (float) getParameter ("stim_width")->getValue();
 
     for (auto stream : getDataStreams())
     {
@@ -430,6 +459,7 @@ void RippleDetector::updateSettings()
         s->viewerFifo.setCapacity (stream->getSampleRate(), VIEWER_FIFO_SECONDS);
 
         s->rippleTtlHigh = false;
+        s->stimOutputHigh = false;
         s->pluginEnabled = true;
         s->isCalibrating = true;
         s->calibrate = true;
@@ -460,6 +490,7 @@ void RippleDetector::updateSettings()
         setChannelChoices (stream, "noise_channel", true, getDataStream (s->rippleSourceStreamId));
         parameterValueChanged (stream->getParameter ("noise_channel"));
         parameterValueChanged (stream->getParameter ("stim_in"));
+        parameterValueChanged (stream->getParameter ("stim_out"));
 
         s->pulseParams = PulseEdgeDetector::Params();
         s->pulseParams.sampleRate = stream->getSampleRate();
@@ -1008,6 +1039,12 @@ void RippleDetector::applyParams (uint16 streamId)
     settings[streamId]->paramsDirty = true;
 }
 
+void RippleDetector::setStimLockoutMs (float ms)
+{
+    laserTrigger.setLockoutMs (ms);
+    stimOutputLockout.setLockout ((int64) (ms / 1000.0 * (double) Time::getHighResolutionTicksPerSecond()));
+}
+
 void RippleDetector::configureLaserTrigger (bool destinationChanged)
 {
     // The destination is only rewritten from the host, transport and port
@@ -1066,6 +1103,7 @@ bool RippleDetector::startAcquisition()
     {
         RippleDetectorSettings* s = settings[stream->getStreamId()];
         s->vetoedOnsets = 0;
+        s->stimOutputHigh = false;
         // Each run starts the test sequence afresh (the periodic schedule, the counts)
         s->testRestart = true;
         s->testTriggered = 0;
@@ -1122,6 +1160,10 @@ bool RippleDetector::stopAcquisition()
             LOGC ("Laser Trigger: Pi receive to GPIO edge mean ", st.meanPiUs, " us, max ", st.maxPiUs, " us");
     }
 
+    if (getStimOutputSent() > 0)
+        LOGC ("Stim. Output: ", (int) getStimOutputSent(), " sent, ", (int) getStimOutputSuppressed(), " suppressed by the ",
+              (float) getParameter ("stim_lockout")->getValue(), " ms stimulation lockout");
+
     return true;
 }
 
@@ -1132,7 +1174,9 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     if (param->getScope() == Parameter::PROCESSOR_SCOPE)
     {
         if (paramName.equalsIgnoreCase ("stim_lockout"))
-            laserTrigger.setLockoutMs ((float) param->getValue());
+            setStimLockoutMs ((float) param->getValue());
+        else if (paramName.equalsIgnoreCase ("stim_width"))
+            stimOutputWidthMs = (float) param->getValue();
         else if (paramName.equalsIgnoreCase ("laser_trigger"))
             configureLaserTrigger (false);
         else if (paramName.startsWithIgnoreCase ("laser_"))
@@ -1214,6 +1258,10 @@ void RippleDetector::parameterValueChanged (Parameter* param)
     else if (paramName.equalsIgnoreCase ("stim_in"))
     {
         s->stimInputLine = (int) param->getValue();
+    }
+    else if (paramName.equalsIgnoreCase ("stim_out"))
+    {
+        s->stimOutputLine = (int) param->getValue();
     }
     else if (paramName.equalsIgnoreCase ("noise_channel"))
     {
@@ -1418,6 +1466,14 @@ void RippleDetector::process (AudioBuffer<float>& buffer)
         const int64 firstSampleInBlock = getFirstSampleNumberForBlock (streamId);
         const int numSamplesInBlock = (int) getNumSamplesInBlock (streamId);
         RippleDetectorSettings* s = settings[streamId];
+
+        // Before this block's detections, so a pulse always falls in a later block than it rose
+        if (s->stimOutputHigh && firstSampleInBlock + numSamplesInBlock > s->stimOutputEnd)
+        {
+            const int at = (int) jlimit ((int64) 0, (int64) std::max (0, numSamplesInBlock - 1), s->stimOutputEnd - firstSampleInBlock);
+            addEvent (s->createEvent (s->stimOutputLine, firstSampleInBlock + at, false), at);
+            s->stimOutputHigh = false;
+        }
 
         // Derived channels must always hold defined values, even when detection is idle
         float* featureOut = nullptr;
@@ -1968,10 +2024,24 @@ void RippleDetector::setRippleTtl (uint16 streamId, bool state, int sampleIndex,
 {
     RippleDetectorSettings* s = settings[streamId];
 
-    // Requested first: it is the latency path to the stimulus
-    // Only a trigger actually sent (not one dropped in the stimulation lockout) is relayed to other streams
-    if (state && laserTrigger.fire() && firedStreams.size() < firedStreams.capacity())
-        firedStreams.push_back (streamId);
+    if (state)
+    {
+        // Requested first: it is the latency path to the stimulus
+        bool sent = laserTrigger.fire();
+
+        if (s->stimOutputLine >= 0 && ! s->stimOutputHigh && stimOutputLockout.allow (Time::getHighResolutionTicks()))
+        {
+            addEvent (s->createEvent (s->stimOutputLine, firstSample + sampleIndex, true), sampleIndex);
+            s->stimOutputHigh = true;
+            s->stimOutputEnd = firstSample + sampleIndex + (int64) (stimOutputWidthMs.load() / 1000.0f * getDataStream (streamId)->getSampleRate());
+            stimOutputSent++;
+            sent = true;
+        }
+
+        // Only a trigger actually sent (not one dropped in the stimulation lockout) is relayed to other streams
+        if (sent && firedStreams.size() < firedStreams.capacity())
+            firedStreams.push_back (streamId);
+    }
 
     addEvent (s->createEvent (s->rippleOutputChannel, firstSample + sampleIndex, state), sampleIndex);
     s->rippleTtlHigh = state;

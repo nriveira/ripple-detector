@@ -333,6 +333,11 @@ void RippleDetectorCanvas::updateCalibrationInfo()
             if (udp && ls.fired > 0)
                 t += "\n  in Pi " + String (ls.meanPiUs, 0) + String::fromUTF8 (" \xc2\xb5s (max ") + String (ls.maxPiUs, 0) + ")";
         }
+
+        if (processor->getStimOutputSent() > 0)
+            t += "\nStim. Output: sent " + String ((int) processor->getStimOutputSent())
+                 + "\n  suppressed by Stim. Lockout: " + String ((int) processor->getStimOutputSuppressed());
+
         return t;
     };
 

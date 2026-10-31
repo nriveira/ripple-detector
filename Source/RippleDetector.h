@@ -15,6 +15,7 @@
 #include "PeriodicSchedule.h"
 #include "LaserTrigger.h"
 #include "StimLatencyMeter.h"
+#include "TriggerLockout.h"
 
 class RippleDetectorEditor;
 
@@ -79,6 +80,9 @@ public:
     StimLatencyMeter latency; // Pairs ripple onsets with that line's rising edges
     int rippleOutputChannel { 0 }; // Output TTL line for ripple events
     bool rippleTtlHigh { false }; // True while the ripple TTL line is high
+    int stimOutputLine { -1 }; // Output TTL line for stimuli (e.g. to Arduino Output), -1 if none
+    bool stimOutputHigh { false }; // True while the stimulus TTL line is high
+    int64 stimOutputEnd { 0 }; // Sample at which it falls
 
     // --- Feature output (derived continuous channels) ---
     bool featureOutputRequested { false }; // Value of the "feature_out" parameter
@@ -293,6 +297,10 @@ public:
     LaserTrigger& getLaserTrigger() { return laserTrigger; }
     const LaserTrigger& getLaserTrigger() const { return laserTrigger; }
 
+    /** Stim. Output: TTL pulses sent, and those dropped in the stimulation lockout */
+    uint32_t getStimOutputSent() const { return stimOutputSent; }
+    uint32_t getStimOutputSuppressed() const { return stimOutputLockout.getSuppressed(); }
+
 private:
     StreamSettings<RippleDetectorSettings> settings;
 
@@ -303,6 +311,14 @@ private:
 
     /** Fires the laser through the LaserDriver Pi's web API on every ripple onset (all streams) */
     LaserTrigger laserTrigger;
+
+    /** One stimulus per event on Stim. Output, whichever stream asks; apart from the laser's, which runs only while it is on */
+    TriggerLockout stimOutputLockout;
+    std::atomic<uint32_t> stimOutputSent { 0 };
+    std::atomic<float> stimOutputWidthMs { 50.0f };
+
+    /** Applies Stim. Lockout to the laser trigger and Stim. Output */
+    void setStimLockoutMs (float ms);
 
     /** Applies the laser_* parameters to laserTrigger; the destination only if it changed */
     void configureLaserTrigger (bool destinationChanged);
