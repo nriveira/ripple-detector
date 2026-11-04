@@ -5,7 +5,7 @@
     noise of different levels and mains hum, square pulses of different amplitudes, optionally
     through an AC coupling (high-pass) like a sound card output, spikes and bursts, and a short
     artefact from the stimulation that follows each pulse (which the lockout must hide). Only
-    rising edges count. Also external onsets, as the periodic test mode gives them.
+    rising edges count.
 */
 
 #include "DetectionMethods/PulseEdgeDetector.h"
@@ -122,40 +122,6 @@ Result run (const std::vector<float>& x, PulseEdgeDetector::Params p, int block)
                 r.offsets.push_back (pos + e.sampleIndex);
         }
     }
-    return r;
-}
-
-/** Like run(), but the pulses' edges are given as external onsets (absolute samples), as from a TTL line */
-Result runExternal (const std::vector<float>& x, PulseEdgeDetector::Params p, int block, const std::vector<int64_t>& edges,
-                    uint32_t* ignored = nullptr)
-{
-    PulseEdgeDetector d;
-    d.setParams (p);
-    d.reset();
-
-    Result r;
-    std::vector<PulseEdgeDetector::Event> events;
-    std::vector<int> onsets;
-    for (int64_t pos = 0; pos < (int64_t) x.size(); pos += block)
-    {
-        const int len = (int) std::min<int64_t> (block, (int64_t) x.size() - pos);
-        onsets.clear();
-        for (int64_t e : edges)
-            if (e >= pos && e < pos + len)
-                onsets.push_back ((int) (e - pos));
-
-        events.clear();
-        d.process (x.data() + pos, len, events, nullptr, nullptr, &onsets);
-        for (const auto& e : events)
-        {
-            if (e.type == PulseEdgeDetector::Event::Onset)
-                r.onsets.push_back ({ pos + e.sampleIndex, pos + e.sampleIndex - e.edgeOffset });
-            else
-                r.offsets.push_back (pos + e.sampleIndex);
-        }
-    }
-    if (ignored != nullptr)
-        *ignored = d.getIgnoredExternal();
     return r;
 }
 
@@ -457,60 +423,6 @@ void testEdgeAtBlockBoundary()
     check (r.onsets.size() == 1 && r.onsets[0].edge == pulses[0].start && r.onsets[0].decision == pulses[0].start + confirmSamples() - 1,
            "boundary: edge on the previous block's last sample, decision Min Width later in the next block");
 }
-void testExternalOnsets()
-{
-    std::printf ("External onsets (pulse edges from a TTL line)\n");
-    const int64_t n = (int64_t) (40 * FS);
-    const auto pulses = pulseTrain (n, 1000.0, 30);
-    std::vector<int64_t> edges;
-    for (const auto& p : pulses)
-        edges.push_back (p.start);
-
-    // File Reader case: the TTL edges only, nothing on the channel
-    {
-        const auto x = makeSignal (n, {}, {});
-        const auto r = runExternal (x, defaults(), 1024, edges);
-        bool exact = r.onsets.size() == edges.size();
-        for (size_t k = 0; exact && k < edges.size(); k++)
-            exact = r.onsets[k].edge == edges[k] && r.onsets[k].decision == edges[k];
-        check (exact, "TTL only: one onset exactly at every edge (" + std::to_string (r.onsets.size()) + ")");
-        bool widths = r.offsets.size() == r.onsets.size();
-        for (size_t k = 0; widths && k < r.offsets.size(); k++)
-            widths = r.offsets[k] - r.onsets[k].decision == 300;
-        check (widths, "TTL only: 10 ms output pulses");
-    }
-
-    // The channel's own crossings are not used: pulses on the channel, no TTL edges
-    {
-        const auto r = runExternal (makeSignal (n, pulses, {}), defaults(), 1024, {});
-        check (r.onsets.empty(), "external mode: pulses on the channel alone are not detected (" + std::to_string (r.onsets.size()) + ")");
-    }
-
-    // Edges during the lockout are ignored and counted
-    {
-        std::vector<int64_t> dense = { (int64_t) (1.0 * FS), (int64_t) (1.4 * FS), (int64_t) (2.2 * FS), (int64_t) (2.5 * FS) };
-        uint32_t ignored = 0;
-        const auto r = runExternal (makeSignal ((int64_t) (4 * FS), {}, {}), defaults(), 1024, dense, &ignored);
-        check (r.onsets.size() == 2 && r.onsets[0].edge == dense[0] && r.onsets[1].edge == dense[2],
-               "external lockout: edges 0.4 s and 0.3 s after a pulse are ignored");
-        check (ignored == 2, "external lockout: ignored edges counted (" + std::to_string (ignored) + ")");
-    }
-
-    // Periodic use: onsets every 0.5 s with a lockout of 0.45 s are all accepted
-    {
-        std::vector<int64_t> ticks;
-        for (int k = 1; k <= 8; k++)
-            ticks.push_back ((int64_t) (k * 0.5 * FS));
-        auto p = defaults();
-        p.lockoutMs = 450.0;
-        uint32_t ignored = 0;
-        const auto r = runExternal (makeSignal ((int64_t) (5 * FS), {}, {}), p, 777, ticks, &ignored);
-        bool exact = r.onsets.size() == ticks.size() && ignored == 0;
-        for (size_t k = 0; exact && k < ticks.size(); k++)
-            exact = r.onsets[k].edge == ticks[k];
-        check (exact, "periodic onsets 0.5 s apart, lockout 0.45 s: every onset exactly on time");
-    }
-}
 } // namespace
 
 int main()
@@ -526,7 +438,6 @@ int main()
     testLongStep();
     testBlockSizes();
     testEdgeAtBlockBoundary();
-    testExternalOnsets();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -11,7 +11,8 @@ void SampleFeatureMethod::reset()
 
 void SampleFeatureMethod::paramsChanged()
 {
-    minDurationSamples = msToSamples (params.minDurationMs);
+    // At least one sample above the onset threshold, also for a minimum duration of 0
+    minDurationSamples = std::max ((int64_t) 1, msToSamples (params.minDurationMs));
     maxDurationSamples = params.maxDurationMs > 0 ? msToSamples (params.maxDurationMs) : 0;
 
     const int newLength = (int) std::max ((int64_t) 1, msToSamples (params.smoothingMs));

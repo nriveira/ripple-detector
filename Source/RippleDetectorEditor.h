@@ -31,10 +31,10 @@ public:
     /** Text for a calibrate button given the stream's calibration state */
     static String calibrateButtonText (RippleDetector* processor, uint16 streamId, bool acquiring);
 
-    /** The calibrate buttons double as Periodic (test)'s START / STOP: sets a button's label, state and tooltip */
+    /** Sets a calibrate button's label, state and tooltip (disabled in Pulse (test), which has nothing to calibrate) */
     static void updateCalibrateButton (UtilityButton& button, RippleDetector* processor, uint16 streamId, bool acquiring);
 
-    /** A calibrate button was pressed: calibrates, or starts / stops Periodic (test) */
+    /** A calibrate button was pressed: calibrates every stream */
     static void calibrateButtonPressed (RippleDetector* processor, uint16 streamId);
 
 private:

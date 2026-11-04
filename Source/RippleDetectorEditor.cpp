@@ -8,14 +8,11 @@ static const int ROW_Y[5] = { 24, 24 + ROW_PITCH, 24 + 2 * ROW_PITCH, 24 + 3 * R
 static const int TEXT_WIDTH = 150;
 
 static const String CALIBRATE_TOOLTIP =
-    "Estimates the baseline of the ripple channel: for 20 s the RMS of every window is collected and its mean and "
-    "standard deviation are computed. The detection threshold is mean + Onset Std Dev x SD. No ripples are reported "
-    "while calibrating. Calibration runs automatically when acquisition starts and when the movement channels change; "
-    "press to run it again, e.g. after moving the electrode or changing the filter.";
-
-static const String PERIODIC_TOOLTIP =
-    "START sends the first response at once, then one every Interval until Pulses have been sent; STOP ends the "
-    "sequence early. Available while acquiring.";
+    "Estimates the baseline of the ripple channel: for 20 s the detection method's feature (the RMS of every window, or "
+    "the envelope or TKEO energy of every sample) is collected and its mean and standard deviation are computed. The "
+    "detection threshold is mean + Onset Std Dev x SD. No ripples are reported while calibrating. Calibration runs "
+    "automatically when acquisition starts, when the method or the movement channels change; press to run it again, "
+    "e.g. after moving the electrode or changing the filter.";
 
 namespace
 {
@@ -123,7 +120,7 @@ private:
 
 // Class constructor
 RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
-    : VisualizerEditor (parentNode, "Ripple Detector", 793)
+    : VisualizerEditor (parentNode, "Ripple Detector", 888)
 {
     rippleDetector = (RippleDetector*) parentNode;
 
@@ -181,11 +178,9 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     addRow ("pulse_thresh", col2, ROW_Y[1]);
     addRow ("pulse_width", col2, ROW_Y[2]);
     addRow ("pulse_lockout", col2, ROW_Y[3]);
-    addRow ("periodic_count", col2, ROW_Y[0]);
-    addRow ("periodic_interval", col2, ROW_Y[1]);
 
-    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "detect_mode", col2, ROW_Y[4]);
-    ParameterEditor* detectMode = getParameterEditor ("detect_mode");
+    addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "detect_method", col2, ROW_Y[4]);
+    ParameterEditor* detectMode = getParameterEditor ("detect_method");
     detectMode->setLayout (ParameterEditor::Layout::nameOnLeft);
     detectMode->setSize (TEXT_WIDTH, ROW_HEIGHT);
 
@@ -235,19 +230,31 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
         ed->setSize (TEXT_WIDTH - 62, ROW_HEIGHT);
     }
 
+    /* Envelope / TKEO settings (updateMethodView shows them for those methods) */
+    const int colMethod = 500;
+
+    for (auto [name, y] : { std::pair<const char*, int> { "smooth_ms", 22 }, { "ripple_std_off", 57 }, { "max_dur", 92 } })
+    {
+        addTextBoxParameterEditor (Parameter::STREAM_SCOPE, name, colMethod, y);
+        ParameterEditor* ed = getParameterEditor (name);
+        ed->setLayout (ParameterEditor::Layout::nameOnTop);
+        ed->setSize (90, 34);
+    }
+
     // One stimulus per event (applies to every stream)
-    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_lockout", 500, 22);
+    const int colStim = 595;
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_lockout", colStim, 22);
     ParameterEditor* stimLockout = getParameterEditor ("stim_lockout");
     stimLockout->setLayout (ParameterEditor::Layout::nameOnTop);
     stimLockout->setSize (90, 34);
 
     // The trigger as a TTL line, for a stimulus downstream such as Arduino Output
-    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "stim_out", 500, 57);
+    addTtlLineParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "stim_out", colStim, 57);
     ParameterEditor* stimOut = getParameterEditor ("stim_out");
     stimOut->setLayout (ParameterEditor::Layout::nameOnTop);
     stimOut->setSize (90, 34);
 
-    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_width", 500, 92);
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "stim_width", colStim, 92);
     ParameterEditor* stimWidth = getParameterEditor ("stim_width");
     stimWidth->setLayout (ParameterEditor::Layout::nameOnTop);
     stimWidth->setSize (90, 34);
@@ -255,7 +262,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     /* Columns 4 and 5: EMG / ACC movement detection, anchored to the right edge.
        Mode, input and output sit in the rightmost column so the block stays flush
        right when movement detection is off and only mode and input are shown. */
-    int col4 = 695;
+    int col4 = 790;
 
     addComboBoxParameterEditor (Parameter::ParameterScope::STREAM_SCOPE, "mov_detect", col4, 22);
     ParameterEditor* movDetect = getParameterEditor ("mov_detect");
@@ -295,7 +302,7 @@ RippleDetectorEditor::RippleDetectorEditor (GenericProcessor* parentNode)
     movOut->setLayout (ParameterEditor::Layout::nameOnTop);
     movOut->setSize (80, 34);
 
-    int col5 = 600;
+    int col5 = 695;
 
     addTextBoxParameterEditor (Parameter::STREAM_SCOPE, "mov_std", col5, 22);
     ParameterEditor* movStd = getParameterEditor ("mov_std");
@@ -341,15 +348,7 @@ String RippleDetectorEditor::calibrateButtonText (RippleDetector* processor, uin
 
 void RippleDetectorEditor::updateCalibrateButton (UtilityButton& button, RippleDetector* processor, uint16 streamId, bool acquiring)
 {
-    const int testMode = processor->getTestMode (streamId);
-
-    if (testMode == RippleDetector::TEST_PERIODIC)
-    {
-        button.setLabel (processor->isPeriodicRunning (streamId) ? "STOP" : "START");
-        button.setEnabledState (acquiring);
-        button.setTooltip (PERIODIC_TOOLTIP);
-    }
-    else if (testMode == RippleDetector::TEST_PULSE)
+    if (processor->getTestMode (streamId) == RippleDetector::TEST_PULSE)
     {
         button.setLabel ("CALIBRATE");
         button.setEnabledState (false); // nothing to calibrate
@@ -365,10 +364,7 @@ void RippleDetectorEditor::updateCalibrateButton (UtilityButton& button, RippleD
 
 void RippleDetectorEditor::calibrateButtonPressed (RippleDetector* processor, uint16 streamId)
 {
-    if (processor->getTestMode (streamId) == RippleDetector::TEST_PERIODIC)
-        processor->setPeriodicRunning (streamId, ! processor->isPeriodicRunning (streamId));
-    else
-        processor->shouldCalibrate = true;
+    processor->shouldCalibrate = true;
 }
 
 void RippleDetectorEditor::showMovementAxesPopup()
@@ -517,9 +513,8 @@ void RippleDetectorEditor::selectedStreamHasChanged()
 
 void RippleDetectorEditor::updateMethodView()
 {
-    // The test modes replace the ripple settings with their own; the noise channel is bypassed
-    const int testMode = rippleDetector->getTestMode (getCurrentStream());
-    const bool pulse = testMode != RippleDetector::TEST_OFF;
+    // The pulse test mode replaces the ripple settings with its own; the noise channel is bypassed
+    const bool pulse = rippleDetector->getTestMode (getCurrentStream()) == RippleDetector::TEST_PULSE;
 
     for (auto* name : { "ripple_std", "time_thresh", "refr_time", "rms_samples", "baseline", "noise_channel" })
         if (auto* ed = getParameterEditor (name))
@@ -527,11 +522,13 @@ void RippleDetectorEditor::updateMethodView()
 
     for (auto* name : { "pulse_sds", "pulse_thresh", "pulse_width", "pulse_lockout" })
         if (auto* ed = getParameterEditor (name))
-            ed->setVisible (testMode == RippleDetector::TEST_PULSE);
+            ed->setVisible (pulse);
 
-    for (auto* name : { "periodic_count", "periodic_interval" })
+    // Envelope and TKEO have an offset threshold, smoothing and a maximum duration
+    const bool hysteresis = ! pulse && ! rippleDetector->getMethodName (getCurrentStream()).equalsIgnoreCase ("RMS");
+    for (auto* name : { "smooth_ms", "ripple_std_off", "max_dur" })
         if (auto* ed = getParameterEditor (name))
-            ed->setVisible (testMode == RippleDetector::TEST_PERIODIC);
+            ed->setVisible (hysteresis);
 
     // Adaptive baseline time constant
     bool adaptive = false;

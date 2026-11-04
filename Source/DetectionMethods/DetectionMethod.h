@@ -155,6 +155,10 @@ public:
     /** True while an event is ongoing (TTL high) */
     bool isEventActive() const { return eventActive; }
 
+    /** Samples from an onset's event sample to the sample at which it was decided, in a block of numSamples
+        (0 for methods that decide on the event sample itself) */
+    virtual int getDecisionLag (int numSamples) const { return 0; }
+
     double getBaselineMean() const { return baseline.getMean(); }
     double getBaselineStd() const { return baseline.getStd(); }
 

@@ -8,13 +8,14 @@
 /**
     Maps a method name to a DetectionMethod instance.
 
-    The plugin currently exposes only the RMS method. The Envelope and TKEO
-    implementations are kept (and unit-tested) for future use; to expose one, add its
-    name to getDetectionMethodNames() and reintroduce a "method" parameter.
+    The names are the first entries of the Detect drop-down, in this order (the
+    position is what a configuration saves).
 */
+constexpr int NUM_DETECTION_METHODS = 3;
+
 inline Array<String> getDetectionMethodNames()
 {
-    return { "RMS" };
+    return { "RMS", "Envelope", "TKEO" };
 }
 
 inline std::unique_ptr<DetectionMethod> createDetectionMethod (const String& name)

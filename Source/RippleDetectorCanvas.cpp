@@ -194,23 +194,24 @@ RippleDetectorCanvas::RippleDetectorCanvas (RippleDetector* processor_) : Visual
     panelTitle->setFont (FontOptions ("Inter", "Medium", 15.0f));
     addAndMakeVisible (panelTitle.get());
 
-    addParameterRow ("detect_mode", true);
+    addParameterRow ("detect_method", true);
     addParameterRow ("pulse_sds", false);
     addParameterRow ("pulse_thresh", false);
     addParameterRow ("pulse_width", false);
     addParameterRow ("pulse_lockout", false);
-    addParameterRow ("periodic_count", false);
-    addParameterRow ("periodic_interval", false);
     addParameterRow ("ripple_std", false);
+    addParameterRow ("ripple_std_off", false);
     addParameterRow ("time_thresh", false);
     addParameterRow ("refr_time", false);
+    addParameterRow ("smooth_ms", false);
+    addParameterRow ("max_dur", false);
     addParameterRow ("rms_samples", false);
     addParameterRow ("baseline", true);
     addParameterRow ("adapt_tau", false);
 
     calibrateButton = std::make_unique<UtilityButton> ("CALIBRATE");
     calibrateButton->setRadius (3.0f);
-    calibrateButton->setTooltip ("Re-estimate the baseline mean and SD of the RMS over 20 s. No ripples are reported while calibrating.");
+    calibrateButton->setTooltip ("Re-estimate the baseline mean and SD of the detection method's feature over 20 s. No ripples are reported while calibrating.");
     calibrateButton->addListener (this);
     addAndMakeVisible (calibrateButton.get());
 
@@ -284,7 +285,6 @@ void RippleDetectorCanvas::updateCalibrationInfo()
     const bool acquiring = processor->getEditor() != nullptr && processor->getEditor()->acquisitionIsActive;
     const bool calibrating = acquiring && processor->isCalibrating (streamId);
 
-    // Calibrates in Ripple mode; START / STOP in Periodic (test)
     RippleDetectorEditor::updateCalibrateButton (*calibrateButton, processor, streamId, acquiring);
     const int testMode = processor->getTestMode (streamId);
 
@@ -361,19 +361,11 @@ void RippleDetectorCanvas::updateCalibrationInfo()
         text += "Pulses detected: " + String ((int) ts.triggered) + ", too short: " + String ((int) ts.rejected);
         text += latencyAndLaserText();
     }
-    else if (testMode == RippleDetector::TEST_PERIODIC)
-    {
-        const auto ts = processor->getTestStats (streamId);
-        const bool running = processor->isPeriodicRunning (streamId);
-        text = "Periodic test mode: " + String ((int) ts.periodicSent) + " of " + String (ts.periodicCount) + " sent, every "
-               + String (ts.periodicIntervalS, 1) + " s.\n"
-               + (running ? "Running; STOP ends it." : acquiring ? "Stopped; START sends the first at once." : "START once acquiring.");
-        text += latencyAndLaserText();
-    }
     else if (calibrating)
     {
         const int percent = (int) std::round (100.0f * std::max (0.0f, processor->getCalibrationProgress (streamId)));
-        text = "Calibrating: collecting RMS windows (" + String (percent) + "% of 20 s).\nNo ripples are reported until this finishes.";
+        text = "Calibrating " + processor->getMethodName (streamId) + " (" + String (percent)
+               + "% of 20 s).\nNo ripples are reported until this finishes.";
     }
     else if (const DetectionParams* params = processor->getStreamParams (streamId))
     {
@@ -381,14 +373,17 @@ void RippleDetectorCanvas::updateCalibrationInfo()
         const double sd = processor->getBaselineStd (streamId);
         if (sd > 0.0)
         {
-            text = "Baseline RMS: mean " + String (mean, 2) + ", SD " + String (sd, 2)
-                   + "\nThreshold: " + String (mean + params->onsetSds * sd, 2) + " (mean + " + String (params->onsetSds, 1) + " SD)";
+            const String name = processor->getMethodName (streamId);
+            text = "Baseline " + name + ": mean " + String (mean, name == "TKEO" ? 6 : 2) + ", SD " + String (sd, name == "TKEO" ? 6 : 2)
+                   + "\nOnset: mean + " + String (params->onsetSds, 1) + " SD";
+            if (name != "RMS")
+                text += ", offset: mean + " + String (std::min (params->offsetSds, params->onsetSds), 1) + " SD";
 
             const double noiseSd = processor->getNoiseBaselineStd (streamId);
             if (processor->hasNoiseChannel (streamId) && noiseSd > 0.0)
             {
                 const double noiseMean = processor->getNoiseBaselineMean (streamId);
-                text += "\nNoise RMS: mean " + String (noiseMean, 2) + ", SD " + String (noiseSd, 2)
+                text += "\nNoise " + name + ": mean " + String (noiseMean, name == "TKEO" ? 6 : 2) + ", SD " + String (noiseSd, name == "TKEO" ? 6 : 2)
                         + "\nVetoed by noise: " + String ((int) processor->getVetoedOnsets (streamId));
             }
 
@@ -406,8 +401,7 @@ void RippleDetectorCanvas::updateCalibrationInfo()
 void RippleDetectorCanvas::updateParameterVisibility()
 {
     // Pulse test mode shows its own settings in place of the ripple settings
-    const int testMode = processor->getTestMode (currentStreamId());
-    const bool pulse = testMode != RippleDetector::TEST_OFF;
+    const bool pulse = processor->getTestMode (currentStreamId()) == RippleDetector::TEST_PULSE;
 
     for (auto* name : { "ripple_std", "time_thresh", "refr_time", "rms_samples", "baseline" })
         if (auto* ed = getParameterEditor (name))
@@ -415,11 +409,12 @@ void RippleDetectorCanvas::updateParameterVisibility()
 
     for (auto* name : { "pulse_sds", "pulse_thresh", "pulse_width", "pulse_lockout" })
         if (auto* ed = getParameterEditor (name))
-            ed->setVisible (testMode == RippleDetector::TEST_PULSE);
+            ed->setVisible (pulse);
 
-    for (auto* name : { "periodic_count", "periodic_interval" })
+    const bool hysteresis = ! pulse && ! processor->getMethodName (currentStreamId()).equalsIgnoreCase ("RMS");
+    for (auto* name : { "ripple_std_off", "smooth_ms", "max_dur" })
         if (auto* ed = getParameterEditor (name))
-            ed->setVisible (testMode == RippleDetector::TEST_PERIODIC);
+            ed->setVisible (hysteresis);
 
     bool adaptive = false;
     if (auto* stream = processor->getDataStream (currentStreamId()))
@@ -789,7 +784,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     auto it = displays.find (streamId);
     const StreamDisplay* display = it != displays.end() ? &it->second : nullptr;
     const int testMode = processor->getTestMode (streamId);
-    const bool pulseMode = testMode != RippleDetector::TEST_OFF; // either test mode
+    const bool pulseMode = testMode == RippleDetector::TEST_PULSE;
     const bool hasNoise = ! pulseMode && processor->hasNoiseChannel (streamId); // bypassed in pulse test mode
 
     // Raw ripple trace on top, the raw noise trace under it (same uV scale), RMS features below
@@ -916,8 +911,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         }
     }
 
-    // Threshold line. Pulse test mode plots the level in multiples of its threshold, so the line sits at 1;
-    // Periodic test mode does not look at the signal and has none
+    // Threshold line. Pulse test mode plots the level in multiples of its threshold, so the line sits at 1
     if (testMode == RippleDetector::TEST_PULSE)
     {
         const auto ts = processor->getTestStats (streamId);
@@ -927,7 +921,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         g.drawText ("threshold: " + String (ts.thresholdNowUv, 0) + String::fromUTF8 (" \xc2\xb5V"),
                     plot.getRight() - 150, (int) yFor (1.0f) - 16, 146, 14, Justification::centredRight);
     }
-    // Ripple mode: mean + x SD, i.e. x in these units; the same for the noise trace
+    // Ripple detection: mean + x SD, i.e. x in these units; the same for the noise trace
     else if (const DetectionParams* params = ! pulseMode ? processor->getStreamParams (streamId) : nullptr)
     {
         const float onset = (float) params->onsetSds;
@@ -975,20 +969,15 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
         g.setColour (EVENT_COLOUR);
         g.drawText ("output TTL", plot.getX() + 240, plot.getY() + 4, 90, 18, Justification::centredLeft);
     }
-    else if (testMode == RippleDetector::TEST_PERIODIC)
-    {
-        g.setColour (EVENT_COLOUR);
-        g.drawText ("output TTL (periodic, signal not used)", plot.getX() + 8, plot.getY() + 4, 280, 18, Justification::centredLeft);
-    }
     else
     {
-        g.drawText ("RMS (baseline SD)", plot.getX() + 8, plot.getY() + 4, 150, 18, Justification::centredLeft);
+        g.drawText (processor->getMethodName (streamId) + " (baseline SD)", plot.getX() + 8, plot.getY() + 4, 150, 18, Justification::centredLeft);
     }
 
     if (hasNoise)
     {
         g.setColour (NOISE_COLOUR);
-        g.drawText ("noise RMS (its baseline SD)", plot.getX() + 150, plot.getY() + 4, 200, 18, Justification::centredLeft);
+        g.drawText ("noise " + processor->getMethodName (streamId) + " (its baseline SD)", plot.getX() + 150, plot.getY() + 4, 200, 18, Justification::centredLeft);
         g.setColour (VETO_COLOUR);
         g.drawText ("vetoed", plot.getX() + 350, plot.getY() + 4, 60, 18, Justification::centredLeft);
     }
@@ -996,7 +985,7 @@ void RippleDetectorCanvas::drawPlot (Graphics& g)
     if (pulseMode)
     {
         g.setColour (PULSE_MODE_COLOUR);
-        g.drawText (testMode == RippleDetector::TEST_PERIODIC ? "PERIODIC TEST MODE" : "PULSE TEST MODE", plot, Justification::centredTop);
+        g.drawText ("PULSE TEST MODE", plot, Justification::centredTop);
     }
     else if (calibrating)
     {

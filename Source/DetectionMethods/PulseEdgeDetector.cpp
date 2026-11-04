@@ -38,7 +38,6 @@ void PulseEdgeDetector::reset()
     lockoutLeft = 0;
     ttlLeft = 0;
     detections = 0;
-    ignoredExternal = 0;
     rejected = 0;
     sampleCount = 0;
 }
@@ -78,21 +77,10 @@ void PulseEdgeDetector::startPulse (int i, int edgeOffset, std::vector<Event>& e
 }
 
 void PulseEdgeDetector::process (const float* data, int numSamples, std::vector<Event>& events,
-                                 float* featureOut, uint8_t* lockoutOut, const std::vector<int>* externalOnsets)
+                                 float* featureOut, uint8_t* lockoutOut)
 {
-    std::size_t nextExternal = 0;
-
     for (int i = 0; i < numSamples; i++, sampleCount++)
     {
-        // An external edge at this sample (any not yet consumed count here too)
-        bool externalHere = false;
-        if (externalOnsets != nullptr)
-            while (nextExternal < externalOnsets->size() && (*externalOnsets)[nextExternal] <= i)
-            {
-                externalHere = true;
-                nextExternal++;
-            }
-
         const double x = (double) data[i];
 
         if (! started)
@@ -116,20 +104,6 @@ void PulseEdgeDetector::process (const float* data, int numSamples, std::vector<
         if (lockoutLeft > 0)
         {
             lockoutLeft--;
-            if (externalHere)
-                ignoredExternal++;
-            continue;
-        }
-
-        // External onsets: the channel's own crossings are not used, only its baseline is kept
-        if (externalOnsets != nullptr)
-        {
-            armed = true;
-            confirming = false;
-            if (externalHere)
-                startPulse (i, 0, events);
-            else
-                track (x, deviation, true);
             continue;
         }
 

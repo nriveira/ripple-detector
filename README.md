@@ -12,7 +12,8 @@ This fork (branch `feature/detection-methods`) adds, for closed-loop stimulation
 - a **closed-loop laser trigger** to the LaserDriver Pi over UDP or HTTP, with a stimulation lockout (one trigger per event);
 - a **Stim. Output** TTL line that drives the GUI's Arduino Output plugin, for running without the LaserHAT;
 - **stimulation latency** measured from the recording, also across streams;
-- **test modes**: Pulse (test), on test pulses in the data, and Periodic (test), on a timer started with START;
+- three **detection methods** to choose from: RMS (the original), Envelope and TKEO;
+- a **pulse test mode**, Pulse (test), on test pulses in the data;
 - a **built-in viewer**, and optional **feature channels** for the LFP Viewer or recording.
 
 ## Installation
@@ -23,31 +24,41 @@ The plugin can be added via the Open Ephys GUI's built-in Plugin Installer. Pres
 
 Instructions for the original Ripple Detector plugin are available [here](https://open-ephys.github.io/gui-docs/User-Manual/Plugins/Ripple-Detector.html). The sections below describe this fork, including what it adds.
 
-## Detection method
+## Detection methods
 
-The input channel is expected to be band-pass filtered in the ripple band (e.g. 150-250 Hz) upstream, for instance with the Bandpass Filter plugin. Detection uses the original windowed-RMS algorithm:
+The input channel is expected to be band-pass filtered in the ripple band (e.g. 150-250 Hz) upstream, for instance with the Bandpass Filter plugin. The **Detect** drop-down chooses the method: **RMS**, **Envelope** or **TKEO**, or the **Pulse (test)** mode described under [Test modes](#test-modes). All three methods share the same steps:
 
-1. The signal is split into consecutive windows of `RMS Samples` samples and the RMS of each window is computed.
-2. During a 20 s **calibration** the RMS values are collected and their mean and standard deviation (SD) are estimated. The detection threshold is *mean + `Onset Std Dev` x SD*. No ripples are reported while calibrating.
-3. Once the RMS has stayed above the threshold for longer than `Time Thresh.`, a TTL pulse one window long is emitted on the `Ripple Output` line and a refractory period of `Refrac. Time` starts.
+1. A **feature** is computed from the signal (below).
+2. During a 20 s **calibration** the feature's values are collected and their mean and standard deviation (SD) are estimated. The onset threshold is *mean + `Onset Std Dev` x SD*. No ripples are reported while calibrating.
+3. Once the feature has stayed above the onset threshold for `Time Thresh.`, the `Ripple Output` TTL goes high, the laser is triggered, and no new ripple can start for `Refrac. Time`.
 
-Calibration runs automatically when acquisition starts, when Ripple Input or Noise Input changes, and when the movement channels change. The **CALIBRATE** button (editor and viewer) restarts it, shows the progress while it runs, and has a tooltip describing the procedure. The viewer also prints the resulting baseline mean, SD and threshold.
+| Method | Feature | TTL |
+|---|---|---|
+| **RMS** (default, the original algorithm) | The RMS of consecutive windows of `RMS Samples` samples | One window long. The onset is stamped at the start of the window that crossed, and decided once that window is complete |
+| **Envelope** | The rectified signal, \|x\|, smoothed by a moving average of `Smoothing` ms (default 5) | High until the feature falls below the **offset threshold**, *mean + `Offset Std Dev` x SD* (default 2 SD), or for `Max Duration` ms at most (0 = no limit). Decided on the onset sample itself |
+| **TKEO** | The Teager-Kaiser energy, x[n]² - x[n-1]·x[n+1], smoothed the same way. It is proportional to (amplitude × frequency)², so it favours the ripple band over slower activity that leaks through the filter | As Envelope |
+
+Envelope and TKEO are causal versions of the classic offline detector (envelope, z-score, onset and offset thresholds, minimum duration). They check the threshold on every sample instead of once per window, and their TTL lasts as long as the ripple does. Their thresholds are not on the same scale as RMS's: each method's feature has its own distribution, so 5 SD of one is not 5 SD of another. The editor shows `Smoothing`, `Offset Std Dev` and `Max Duration` only for Envelope and TKEO; `RMS Samples` stays, since movement detection uses it too.
+
+Each method has its own baseline, so changing the method recalibrates the stream (also during acquisition). The detector keeps one of each method per stream, so switching costs nothing on the processing thread. The choice is saved as `detect_method`. Configurations saved before this had `detect_mode`, with Periodic (test), which was removed; they load with RMS, so set Detect again after loading one.
+
+Calibration runs automatically when acquisition starts, when Ripple Input, Noise Input or the method changes, and when the movement channels change. The **CALIBRATE** button (editor and viewer) restarts it, shows the progress while it runs, and has a tooltip describing the procedure. The viewer also prints the resulting baseline mean, SD and thresholds.
 
 Notes:
 
 - `Refrac. Time` is counted in samples from the event onset. The original plugin used wall-clock time, which drifted during File Reader playback.
-- Envelope and TKEO detection methods exist in `Source/DetectionMethods/` and are unit-tested, but are not exposed in the plugin at the moment.
+- The onset needs at least one sample above the threshold even with `Time Thresh.` 0. (Before this, Envelope and TKEO started an event on any sample when it was 0.)
 
 **Baseline** selects how the baseline statistics evolve after calibration:
 
 - *Fixed* (default): the calibration values are used until the next calibration.
 - *Adaptive*: the mean and standard deviation keep tracking the signal outside of detected events with an exponential time constant of `Adapt Tau` seconds, so the threshold follows slow drifts in signal amplitude during long sessions.
 
-**Ripple Input** and **Noise Input** are drop-downs of the stream's channel names, so the channel is chosen by name even when a Channel Map upstream has reordered the channels. If the channel order changes later, for example after editing the Channel Map, each choice stays on the same channel name. Ripple Input defaults to the stream's first channel. Set it to **None** on a stream that should not be detected on, such as the headstage IMU's: such a stream emits no TTLs and fires no laser, and Periodic (test) still runs on it. (Ripple Input is saved as `ripple_input`. Configurations saved before it had a None entry fall back to the first channel once, so check it after loading one.)
+**Ripple Input** and **Noise Input** are drop-downs of the stream's channel names, so the channel is chosen by name even when a Channel Map upstream has reordered the channels. If the channel order changes later, for example after editing the Channel Map, each choice stays on the same channel name. Ripple Input defaults to the stream's first channel. Set it to **None** on a stream that should not be detected on, such as the headstage IMU's: such a stream emits no TTLs and fires no laser. (Ripple Input is saved as `ripple_input`. Configurations saved before it had a None entry fall back to the first channel once, so check it after loading one.)
 
 **Detecting on another stream's channel (e.g. the LFP stream).** Below this stream's own channels, Ripple Input also lists the other streams' electrode channels, named after their stream, e.g. `LFPStream: LFP_A_CH1` for the GLANCE board's LFP stream when its LFP engine is on. Detection then reads that channel and runs at that stream's rate (2.5 kHz for an LFP stream decimated by 12, say). RMS Samples is still set in this stream's samples and is converted, so the RMS window keeps its duration; 128 at 30 kHz is about 4.3 ms. Noise Input then lists that stream's channels. The Ripple Output TTL, the laser trigger, the Stim. Input pairing and the feature channels stay on this stream, with the TTL edges mapped onto its samples to within one sample of the detection stream. The viewer shows the detection stream's signal, and its title names it. Ripple Input is locked during acquisition. Two cautions: set the LFP stream's own Ripple Input to None, so it does not detect on its own as well; and the ripple band (about 150-250 Hz) must lie inside the LFP filter's passband, since the firmware's low-pass and decimation filter also add their delay to the latency.
 
-**Noise Input** is optional and defaults to **None**, in which case detection uses the ripple channel alone. Choosing a channel from the drop-down selects one that should not carry ripples, for example one far from the pyramidal layer or on a reference electrode. It is judged with the same method and settings as the ripple channel, against its own baseline (calibrated alongside the ripple channel). A ripple onset is vetoed, with no TTL and no laser trigger, when the noise channel is above its onset threshold in the same RMS window: an event that appears on both channels at once is treated as noise (movement, chewing, electrical artefact). Only the same window is checked, so the veto never delays a stimulus. The noise channel does not also have to satisfy `Time Thresh.`, because the ripple onset already has; with the two channels' backgrounds differing, the noise channel often completes its own duration one window later, and requiring it let common-mode bursts through in testing. A vetoed onset still starts the refractory period. Selecting or changing the noise channel recalibrates the stream, and the log reports the number of vetoed onsets at the end of each run.
+**Noise Input** is optional and defaults to **None**, in which case detection uses the ripple channel alone. Choosing a channel from the drop-down selects one that should not carry ripples, for example one far from the pyramidal layer or on a reference electrode. It is judged with the same method and settings as the ripple channel, against its own baseline (calibrated alongside the ripple channel). A ripple onset is vetoed, with no TTL and no laser trigger, when the noise channel is in an event at the onset's sample: with RMS, above its onset threshold in the same window; with Envelope and TKEO, past its onset threshold and not yet back below its offset threshold. An event that appears on both channels at once is treated as noise (movement, chewing, electrical artefact). Only the onset's sample is checked, so the veto never delays a stimulus. The noise channel does not also have to satisfy `Time Thresh.`, because the ripple onset already has; with the two channels' backgrounds differing, the noise channel often completes its own duration one window later, and requiring it let common-mode bursts through in testing. A vetoed onset still starts the refractory period. Selecting or changing the noise channel recalibrates the stream, and the log reports the number of vetoed onsets at the end of each run.
 
 Movement gating (EMG / accelerometer) blocks ripple events while movement is detected. When movement blocks detection, a ripple TTL that is currently high is forced low. While `Mov. Detect` is OFF the editor hides the movement settings except the channel choice, which must be set before ACC or EMG can be selected. The `Mov. Output` TTL line sits with the other TTL lines.
 
@@ -88,7 +99,7 @@ With **Laser Trigger** on, every ripple onset fires the laser through the [Laser
 | Control | Meaning |
 |---|---|
 | `Laser Trigger` | On/off; can be switched during acquisition |
-| `Stim. Lockout` | After a trigger is sent, none is sent for this long (default 500 ms, 0 = off), whichever stream or mode asks: one UDP trigger per event. **Stim. Output** is limited the same way. Detections in the lockout keep their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact, and shorter than the Periodic interval |
+| `Stim. Lockout` | After a trigger is sent, none is sent for this long (default 500 ms, 0 = off), whichever stream or mode asks: one UDP trigger per event. **Stim. Output** is limited the same way. Detections in the lockout keep their Ripple Output TTL and are counted as suppressed. Keep it longer than the laser pulse and its artefact |
 | `TEST` | Fires once, whether or not `Laser Trigger` is on (and outside the lockout), and shows the answer on the button: the round trip in ms when it fired, `BUSY` (the laser was mid-pulse and ignores it), `NO MCU` (the Pi has not heard from the laser controller), `REJECTED` (the Pi answered but did not fire), `NO LINK` (no answer) or `SET HOST` |
 | `Laser Host` | Numeric IPv4 address of the Pi (default 192.168.17.10, the rig's Pi; no host names, so a trigger never waits on a lookup) |
 | `UDP` / `HTTP` + `Port` | Transport, and its port (UDP 17017, HTTP 8080) |
@@ -131,8 +142,8 @@ Record the stimulus controller's trigger on one of the acquisition board's digit
 
 The latency is reported two ways:
 
-- from the ripple TTL event, which is stamped at the start of the RMS window that crossed threshold, so it matches an offline comparison of the two lines in the recording;
-- from the detection decision, the end of that window, which is the first sample at which the detector could have known. The difference between the two is the windowing.
+- from the ripple TTL event, so it matches an offline comparison of the two lines in the recording. With RMS the event is stamped at the start of the window that crossed threshold;
+- from the detection decision, the first sample at which the detector could have known: with RMS, the end of that window (the difference between the two is the windowing); with Envelope and TKEO, the event's own sample, so the two are the same.
 
 The viewer panel shows the mean, range and last value, and the log gives the run's summary when acquisition stops. Onsets with no trigger within 500 ms are counted as *no stimulus* (e.g. the laser was busy or the request failed), and triggers with no onset before them as *no onset* (e.g. the laser's TEST button).
 
@@ -144,7 +155,7 @@ When the detection runs on one stream and the stimulus controller's TTL returns 
 
 ### Test modes
 
-Two **Detect** modes test the stimulation loop without ripples. Both respond exactly as to a ripple: Ripple Output TTL (10 ms), laser trigger, Stim. Output and stimulation latency. Both bypass the noise veto and movement gating and need no calibration, and switching back to Ripple recalibrates the stream. The viewer marks each output TTL with a solid green line at its onset, and shows a banner for the mode.
+**Pulse (test)**, the last entry of **Detect**, tests the stimulation loop without ripples. It responds exactly as to a ripple: Ripple Output TTL (10 ms), laser trigger, Stim. Output and stimulation latency. It bypasses the noise veto and movement gating and needs no calibration, and switching back to a method recalibrates the stream. The viewer marks each output TTL with a solid green line at its onset, and shows a banner for the mode. (Periodic (test), which responded on a timer, has been removed.)
 
 **Pulse (test)** detects square test pulses in the continuous data of the Ripple Input channel, from the File Reader recording in `Resources/Test Recording` or from test pulses played into saline. Each detection triggers the LaserHAT, whose output TTL returns to the acquisition board's digital input (Stim. Input). The stimulation artefact in the continuous data is analysed offline.
 
@@ -154,20 +165,18 @@ Two **Detect** modes test the stimulation loop without ripples. Both respond exa
 - **Lockout:** after an edge, nothing is detected for **Lockout** (default 1000 ms), and detection re-arms only once the signal has settled back to its baseline. This hides the pulse's falling edge, the undershoot of an AC-coupled sound card and the stimulation's own artefact, so each test pulse gets exactly one response. Keep the lockout longer than the pulses and shorter than the gaps between them.
 - **Viewer:** the pulse channel, and the signal minus the baseline in multiples of the current threshold (the threshold line sits at 1). The side panel shows the noise SD and the threshold in µV, the pulses detected, those too short, and the latency.
 
-**Periodic (test)** sends **Pulses** responses, **Interval** seconds apart, for repeated tests of the stimulation. Nothing is sent until **START** (the CALIBRATE button's place, in the editor and in the viewer, enabled while acquiring). The first response goes out at once, and the sequence stops by itself after Pulses responses or at **STOP**. Starting acquisition or switching modes leaves it stopped. A script can do the same with `PERIODIC START` / `PERIODIC STOP`, sent as a config message (`PUT /api/processors/<id>/config {"text": "PERIODIC START"}`, which answers with what it did) or as a broadcast (`PUT /api/message`). The continuous signal is not used, and the Ripple Input may be None. The side panel shows how many have been sent and whether the sequence is running.
-
 The test audio (1 ms pulses), its wiring and a step-by-step setup are in [Resources/Test Audio](Resources/Test%20Audio/README.md). `Tools/make_test_pulses.py` regenerates it with other pulse widths, amplitudes or gaps. The same pulses are also an Open Ephys recording, `Resources/Test Recording/structure.oebin`, which the **File Reader** plays back. `Tools/wav_to_openephys.py` converts any WAV the same way, and with `--stim-delay-ms` adds a simulated stimulation artefact at a known delay after every pulse, for testing an offline analysis.
 
 ### Adding a method
 
-Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), register its name in `DetectionMethodFactory.h`, and add any new parameters in `RippleDetector::registerParameters()` and the editor.
+Detection algorithms live in `Source/DetectionMethods/` and have no dependency on JUCE or the GUI. To add one, subclass `DetectionMethod` (or `SampleFeatureMethod` for per-sample features with dual-threshold detection), add its name at the end of `getDetectionMethodNames()` in `DetectionMethodFactory.h`, raise `NUM_DETECTION_METHODS` and create it in `createDetectionMethod()`. It then appears in **Detect** before Pulse (test). Configurations save the position, so a new method added before the others would shift the saved choices. Add any new parameters in `RippleDetector::registerParameters()`, the editor's `updateMethodView()` and the viewer's parameter panel. If it decides an onset after the onset's own sample, as RMS does, override `getDecisionLag()`.
 
 ### Testing the methods
 
-`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (rising edges only, noise levels from 3 to 300 µV, mixed pulse amplitudes, spikes, bursts and impulsive noise, a change in noise, AC coupling, stimulation artefacts, lockout, block sizes and external onsets), `Tests/PeriodicScheduleTests.cpp` the periodic test mode's timer, and `Tests/TriggerLockoutTests.cpp` the stimulation lockout. All need only a C++17 compiler:
+`Tests/DetectionMethodTests.cpp` runs the methods over synthetic band-limited noise with ripple bursts, spike artefacts and amplitude drift, and checks the noise veto against common-mode bursts on two channels, for each method, and that no method starts an event below threshold with `Time Thresh.` 0. `Tests/LaserTriggerUdpTests.cpp` and `Tests/LaserTriggerHttpTests.cpp` check the laser trigger over UDP and HTTP, `Tests/StimLatencyMeterTests.cpp` the latency pairing, `Tests/PulseEdgeDetectorTests.cpp` the pulse test mode's edge detector (rising edges only, noise levels from 3 to 300 µV, mixed pulse amplitudes, spikes, bursts and impulsive noise, a change in noise, AC coupling, stimulation artefacts, lockout and block sizes), and `Tests/TriggerLockoutTests.cpp` the stimulation lockout. All need only a C++17 compiler:
 
 ```bash
-cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/periodic_schedule_tests && ./Tests/build/trigger_lockout_tests
+cmake -S Tests -B Tests/build && cmake --build Tests/build && ./Tests/build/detection_tests && ./Tests/build/laser_trigger_tests && ./Tests/build/latency_meter_tests && ./Tests/build/laser_trigger_udp_tests && ./Tests/build/pulse_edge_tests && ./Tests/build/trigger_lockout_tests
 ```
 
 ## Building from source

@@ -36,11 +36,6 @@
     The stimulation that follows a pulse is not analysed here: it returns as a TTL
     (Stim. Input) and its artefact on the channel is analysed offline.
 
-    External onsets: process() can instead be given the onsets (e.g. from a
-    periodic schedule). Each starts a pulse exactly as a detected edge would
-    (output TTL, lockout), onsets during the lockout are ignored and counted, and
-    the channel's own threshold crossings are not used.
-
     Free of JUCE so Tests/ can drive it. Not thread-safe: setParams() and
     process() are called from the audio thread.
 */
@@ -68,7 +63,7 @@ public:
 
         int sampleIndex; // the sample that confirmed it (Onset) or the TTL's end (TtlOff)
         Type type;
-        int edgeOffset; // Onset: samples from the first threshold crossing back to sampleIndex (>= 0; 0 for external onsets)
+        int edgeOffset; // Onset: samples from the first threshold crossing back to sampleIndex (>= 0)
     };
 
     static constexpr double CONFIRM_FRACTION = 0.75; // share of the confirmation samples that must be above threshold
@@ -89,13 +84,9 @@ public:
         Runs one block, appending TTL edges to 'events'. Optional outputs per sample:
         featureOut receives x - baseline (signed); lockoutOut is 1 while detection is
         locked out or waiting to re-arm, 0 while armed.
-
-        externalOnsets (optional, sorted block-relative sample indices): the onsets
-        come from elsewhere and the channel's crossings are not used; see above.
     */
     void process (const float* data, int numSamples, std::vector<Event>& events,
-                  float* featureOut = nullptr, uint8_t* lockoutOut = nullptr,
-                  const std::vector<int>* externalOnsets = nullptr);
+                  float* featureOut = nullptr, uint8_t* lockoutOut = nullptr);
 
     /** The noise SD estimate and the threshold it gives now (0 before the warm-up is over) */
     double getNoiseSd() const { return noiseReady ? noiseMad * MAD_TO_SD : 0.0; }
@@ -104,7 +95,6 @@ public:
     bool isLockedOut() const { return lockoutLeft > 0; }
     bool isTtlHigh() const { return ttlLeft > 0; }
     uint32_t getDetections() const { return detections; }
-    uint32_t getIgnoredExternal() const { return ignoredExternal; } // external onsets that fell in a lockout
     uint32_t getRejected() const { return rejected; } // crossings that did not stay up for Min Width
 
 private:
@@ -140,7 +130,6 @@ private:
     int64_t lockoutLeft { 0 };
     int64_t ttlLeft { 0 };
     uint32_t detections { 0 };
-    uint32_t ignoredExternal { 0 };
     uint32_t rejected { 0 };
 
     /** A pulse's edge at block sample i: starts the TTL and the lockout */

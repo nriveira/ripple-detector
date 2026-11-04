@@ -22,6 +22,9 @@ public:
     void calibrate (const float* data, int numSamples, float* featureOut) override;
     void process (const float* data, int numSamples, std::vector<DetectionEvent>& events, float* featureOut) override;
 
+    /** The onset is stamped at the start of the window that crossed, and decided once that window is complete */
+    int getDecisionLag (int numSamples) const override { return std::max (1, std::min (params.rmsSamples, numSamples)); }
+
 protected:
     void paramsChanged() override;
 

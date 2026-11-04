@@ -584,6 +584,25 @@ void addBurst (std::vector<float>& data, int start, int length, double amplitude
     }
 }
 
+void testZeroMinDuration()
+{
+    std::printf ("Minimum duration 0\n");
+
+    // Noise only: an onset needs the feature above threshold, even with no minimum duration
+    // (the noise veto runs its method this way)
+    const Signal s = makeSignal (40.0, 20.0, 100.0, 0.0, 50.0, false);
+    for (const std::string name : { "RMS", "Envelope", "TKEO" })
+    {
+        auto p = defaultParams();
+        p.minDurationMs = 0;
+        auto method = makeMethod (name);
+        method->setParams (p);
+        const auto on = onsets (run (*method, s, 20.0, 1024));
+        std::printf ("  %-8s %zu onsets in 20 s of noise\n", name.c_str(), on.size());
+        check (on.size() < 10, name + ": no onsets below threshold with a minimum duration of 0");
+    }
+}
+
 void testNoiseVeto()
 {
     std::printf ("Noise channel veto\n");
@@ -608,13 +627,15 @@ void testNoiseVeto()
         }
     }
 
+    for (const std::string name : { "RMS", "Envelope", "TKEO" })
     for (int blockSize : { 1024, 333 })
     {
-        RmsWindowMethod method;
+        auto methodPtr = makeMethod (name);
+        DetectionMethod& method = *methodPtr;
         method.setParams (defaultParams());
         method.reset();
 
-        NoiseVeto veto (std::make_unique<RmsWindowMethod>());
+        NoiseVeto veto (makeMethod (name));
         veto.setParams (defaultParams());
         veto.reset();
 
@@ -652,9 +673,9 @@ void testNoiseVeto()
                     (veto.vetoes (e.sampleIndex) ? vetoed : passed).push_back (pos + e.sampleIndex);
         }
 
-        const std::string tag = "block " + std::to_string (blockSize) + ": ";
-        std::printf ("  block %4d: %zu ripples, %zu bursts -> %zu passed, %zu vetoed\n",
-                     blockSize, sig.ripples.size(), bursts.size(), passed.size(), vetoed.size());
+        const std::string tag = name + ", block " + std::to_string (blockSize) + ": ";
+        std::printf ("  %-8s block %4d: %zu ripples, %zu bursts -> %zu passed, %zu vetoed\n",
+                     name.c_str(), blockSize, sig.ripples.size(), bursts.size(), passed.size(), vetoed.size());
 
         check (passed.size() == sig.ripples.size(), tag + "every ripple passes the veto");
         check (vetoed.size() == bursts.size(), tag + "every common-mode burst is vetoed");
@@ -691,6 +712,7 @@ int main()
     testAdaptiveBaseline();
     testParameterChangeMidRun();
     testFeatureOutput();
+    testZeroMinDuration();
     testNoiseVeto();
 
     std::printf ("\n%d checks, %d failures\n", checks, failures);

@@ -14,11 +14,11 @@
     Live view of the ripple detection features.
 
     Shows, for the stream selected in the editor, the ripple channel as it enters the
-    detector and, below it, the z-scored RMS feature together with the detection
+    detector and, below it, the selected method's z-scored feature together with the detection
     threshold, detected events, the movement-blocked state and the calibration progress.
     When movement channels are chosen (e.g. the headstage IMU's axes), they are drawn in a
     movement panel, each in its own lane and scaled to its own range.
-    With a noise channel selected, its RMS is drawn against its own baseline and vetoed
+    With a noise channel selected, its feature is drawn against its own baseline and vetoed
     onsets are marked. The detection parameters of the stream can be edited from the
     panel on the right.
 */

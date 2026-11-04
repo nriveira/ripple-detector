@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "DetectionMethods/DetectionMethod.h"
+#include "DetectionMethods/DetectionMethodFactory.h"
 #include "DetectionMethods/NoiseVeto.h"
 #include "FeatureFifo.h"
 #include "DetectionMethods/PulseEdgeDetector.h"
-#include "PeriodicSchedule.h"
 #include "LaserTrigger.h"
 #include "StimLatencyMeter.h"
 #include "TriggerLockout.h"
@@ -32,9 +32,15 @@ public:
     TTLEventPtr createEvent (int64 outputLine, int64 sample_number, bool state);
 
     // --- Ripple detection ---
-    std::unique_ptr<DetectionMethod> method; // The RMS detection algorithm
-    DetectionParams params; // Parameters handed to the method
-    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the method
+    // One instance of each method (RMS, Envelope, TKEO), so switching allocates nothing on the audio thread
+    std::array<std::unique_ptr<DetectionMethod>, NUM_DETECTION_METHODS> methods;
+    std::array<std::unique_ptr<NoiseVeto>, NUM_DETECTION_METHODS> noiseVetoes; // the same method on the noise channel
+    std::atomic<int> methodRequested { 0 }; // "detect_method" (message thread)
+    std::atomic<int> methodActive { 0 }; // the method in use (audio thread)
+    DetectionMethod* method() const { return methods[(size_t) methodActive.load()].get(); }
+    NoiseVeto* noiseVeto() const { return noiseVetoes[(size_t) methodActive.load()].get(); }
+    DetectionParams params; // Parameters handed to the methods
+    std::atomic<bool> paramsDirty { false }; // params changed and must be pushed to the methods
     std::vector<DetectionEvent> events; // Scratch buffer for events produced in the current block
     std::vector<float> featureScratch; // Feature values for the block
     std::vector<float> zScratch; // Z-scored feature values for the block
@@ -71,7 +77,6 @@ public:
 
     // --- Noise channel veto ---
     int noiseInputChannel { -1 }; // Global index of the noise channel, -1 if none
-    std::unique_ptr<NoiseVeto> noiseVeto; // Same method and settings, run on the noise channel
     std::vector<float> noiseFeatureScratch; // Noise channel feature values for the block
     std::atomic<uint32_t> vetoedOnsets { 0 }; // Onsets suppressed by the noise channel this run
 
@@ -87,32 +92,23 @@ public:
     // --- Feature output (derived continuous channels) ---
     bool featureOutputRequested { false }; // Value of the "feature_out" parameter
     bool featureOutputActive { false }; // Derived channels exist for this stream
-    ContinuousChannel* featureChannel { nullptr }; // RIP_FEAT: the RMS feature
+    ContinuousChannel* featureChannel { nullptr }; // RIP_FEAT: the method's feature
     ContinuousChannel* thresholdChannel { nullptr }; // RIP_THR: baseline mean + x SD
     ContinuousChannel* eventChannelOut { nullptr }; // RIP_EVENT: threshold-height pulse while a ripple is detected
 
-    // --- Test modes ---
-    // Pulse (test): detect square test pulses on the Ripple Input channel; Periodic (test):
-    // respond on a timer, ignoring the channel. Both respond as to a ripple (TTL, laser, latency).
-    std::atomic<int> testModeRequested { 0 }; // "detect_mode": TEST_OFF, TEST_PULSE or TEST_PERIODIC (message thread)
+    // --- Test mode ---
+    // Pulse (test): detect square test pulses on the Ripple Input channel, and respond as to a ripple (TTL, laser, latency)
+    std::atomic<int> testModeRequested { 0 }; // from "detect_method": TEST_OFF or TEST_PULSE (message thread)
     int testModeActive { 0 }; // audio thread
     PulseEdgeDetector pulse;
     PulseEdgeDetector::Params pulseParams; // written by parameterValueChanged, handed over with testParamsDirty
-    PeriodicSchedule periodic;
-    int periodicCount { 10 }; // "periodic_count"
-    double periodicIntervalS { 2.0 }; // "periodic_interval"
     std::atomic<bool> testParamsDirty { false };
-    bool testRestart { true }; // restart the detector / schedule at the next block (acquisition start, mode switch)
-    std::vector<int> externalOnsets; // periodic onsets in this block
+    bool testRestart { true }; // restart the detector at the next block (acquisition start, mode switch)
     std::vector<PulseEdgeDetector::Event> pulseEvents;
     std::atomic<uint32_t> testTriggered { 0 }; // responses this run
-    std::atomic<uint32_t> testIgnored { 0 }; // pulses ignored in the lockout this run (detected pulses re-arm, so mostly 0)
-    std::atomic<uint32_t> periodicSent { 0 };
     std::atomic<float> pulseNoiseSd { 0.0f }; // Pulse: the detector's noise estimate and threshold, for the viewer
     std::atomic<float> pulseThreshold { 0.0f };
     std::atomic<uint32_t> pulseRejected { 0 };
-    std::atomic<bool> periodicRun { false }; // Periodic: START pressed and the sequence not finished (message thread sets it)
-    bool periodicActive { false }; // audio thread: the schedule is running
 
     // --- Calibration ---
     bool isCalibrating { true }; // Is in the calibration step
@@ -223,29 +219,22 @@ public:
     int getStimInputLine (uint16 streamId);
     StimLatencyMeter::Stats getLatencyStats (uint16 streamId);
 
-    /** "PERIODIC START" / "PERIODIC STOP": the START / STOP button for every stream in Periodic (test),
-        e.g. from a script through the HTTP API (PUT /api/processors/<id>/config or /api/message) */
-    String handleConfigMessage (const String& msg) override;
-    void handleBroadcastMessage (const String& msg, const int64 systemTimeMillis) override;
-
     /** Pairs the stimulus controller's hardware trigger with the ripple onsets */
     void handleTTLEvent (TTLEventPtr event) override;
 
-    /** "detect_mode" values */
-    static constexpr int TEST_OFF = 0; // ripple detection
+    /** Test modes, from "detect_method" */
+    static constexpr int TEST_OFF = 0; // ripple detection (RMS, Envelope or TKEO)
     static constexpr int TEST_PULSE = 1; // Pulse (test)
-    static constexpr int TEST_PERIODIC = 2; // Periodic (test)
 
-    /** The stream's "detect_mode": TEST_OFF, TEST_PULSE or TEST_PERIODIC */
+    /** The stream's test mode: TEST_OFF or TEST_PULSE */
     int getTestMode (uint16 streamId);
 
-    /** True in either test mode */
-    bool isTestMode (uint16 streamId) { return getTestMode (streamId) != TEST_OFF; }
+    /** The stream's ripple detection method ("RMS", "Envelope" or "TKEO"), as chosen in Detect */
+    String getMethodName (uint16 streamId);
 
     struct TestStats
     {
         uint32_t triggered; // responses this run
-        uint32_t periodicSent; // Periodic: responses sent this run
         double minStepUv; // Pulse: Min Step
         double thresholdSds; // Pulse: Pulse SDs
         double minWidthMs; // Pulse: Min Width
@@ -253,17 +242,10 @@ public:
         float noiseSdUv; // Pulse: the channel's noise SD estimate now
         float thresholdNowUv; // Pulse: the threshold it gives (0 before the first estimate)
         uint32_t rejected; // Pulse: crossings shorter than Min Width
-        int periodicCount;
-        double periodicIntervalS;
     };
 
-    /** The test modes' settings and counts for a stream */
+    /** The pulse test mode's settings and counts for a stream */
     TestStats getTestStats (uint16 streamId);
-
-    /** Periodic (test): START / STOP. A started sequence sends its first response at once and stops by itself
-        after Pulses responses; it never starts on its own (acquisition start and mode switches leave it stopped). */
-    void setPeriodicRunning (uint16 streamId, bool run);
-    bool isPeriodicRunning (uint16 streamId);
 
     /** The movement panel's traces for a stream: their names (empty if none), rate and version */
     struct MovementView
@@ -357,9 +339,6 @@ private:
     /** Hands the block's movement channels, decimated, to the viewer's movement panel */
     void publishMovement (uint16 streamId, AudioBuffer<float>& buffer);
 
-    /** Applies a PERIODIC START / STOP message; returns how many streams it reached, or -1 if it is not one */
-    int applyPeriodicMessage (const String& msg);
-
     /** Fills the viewer queue with silence and no flags (Ripple Input None) */
     void publishSilence (uint16 streamId, int numSamples);
 
@@ -369,12 +348,9 @@ private:
     /** Runs the method on the ripple channel, applies the noise veto and emits the events */
     void processRipples (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples, int64 firstSample, float* featureOut, float* eventOut);
 
-    /** Test modes: responds to detected test pulses or the periodic timer with the same outputs as a ripple */
+    /** Pulse (test): responds to detected test pulses with the same outputs as a ripple */
     void processTestTrigger (uint16 streamId, const float* data, int numSamples, int64 firstSample,
                              float* featureOut, float* thresholdOut, float* eventOut);
-
-    /** RIP_EVENT's level while a periodic test response's TTL is high (there is no threshold in that mode) */
-    static constexpr float TEST_EVENT_LEVEL = 1000.0f;
 
     /** Z-scores the block's features and hands them, with the raw ripple channel, to the viewer queue */
     void publishFeatures (uint16 streamId, const float* rippleData, const float* noiseData, int numSamples);
